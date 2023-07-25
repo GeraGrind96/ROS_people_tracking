@@ -1,0 +1,12 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/home/gerardo/ros_projects/noche_investigadores/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages",
+        "~/LearnBlock"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/gerardo/ros_projects/noche_investigadores/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages",
+        "~/LearnBlock"
+    ]
+}

@@ -1,0 +1,13 @@
+int64 id
+int64 left
+int64 top
+int64 right
+int64 bot
+int64 type
+float64 score
+float64 orientation
+float64 depth
+bool exist_position
+geometry_msgs/Pose pose
+geometry_msgs/Twist speed
+sensor_msgs/Image image
