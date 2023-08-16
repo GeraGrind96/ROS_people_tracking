@@ -15,7 +15,6 @@ class STrack(BaseTrack):
         self._pose = np.asarray(pose, dtype=np.float)
 
         self.last_pose = [math.inf, math.inf]
-
         self.speed_pose = [0, 0]
 
         self.kalman_filter = None
@@ -25,8 +24,9 @@ class STrack(BaseTrack):
         self.image = image
         self.hash = hash
         self.bbox = np.asarray(bbox, dtype=np.float)
+        self.associated_legs = None
 
-        self.hash_memory = deque(maxlen=50)
+        self.hash_memory = deque(maxlen=100)
         self.last_hash_stored = time.time()
 
         self.speed_memory = deque(maxlen=3)
@@ -34,7 +34,7 @@ class STrack(BaseTrack):
         # self.store_speed_period = 0.1
         self.speed = 0
 
-        self.store_period = 0.3
+        self.store_period = 0.33
         self.score = score
         self.tracklet_len = 0
         self.enable_kalman = kalman_enabled
@@ -79,6 +79,7 @@ class STrack(BaseTrack):
             self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
+        
 
     def re_activate(self, new_track, frame_id, new_id=False):
         if not any(math.isnan(element) or math.isinf(element) or element == 0 for element in new_track._pose):
@@ -135,10 +136,8 @@ class STrack(BaseTrack):
         if not any(math.isnan(element) or math.isinf(element) or element == 0 for element in new_track._pose):
             # print("update FUNCTION POSE:", new_track._pose)
             if self.enable_kalman:
-
                 # if time.time() - self.last_speed_stored > self.store_speed_period:
                 self.difference_between_updates = time.time() - self.last_kalman_update
-
 
                 if not self.kalman_initiated:
                     self.mean, self.covariance = self.kalman_filter.initiate(new_track._pose)
@@ -151,7 +150,6 @@ class STrack(BaseTrack):
                     self.last_kalman_update = time.time()
 
                 speed_module = round(math.sqrt(self.mean[2] ** 2 + self.mean[3] ** 2), 2)
-                print("speed and time difference:", speed_module, self.difference_between_updates)
                 self.speed_memory.append(speed_module / self.difference_between_updates)
                 self.last_speed_stored = time.time()
                 if len(self.speed_memory) > 0:
@@ -162,6 +160,11 @@ class STrack(BaseTrack):
         self.state = TrackState.Tracked
         self.is_activated = True
         self.image = new_track.image
+        # if time.time() - self.last_hash_stored > self.store_period:
+        if time.time() - self.last_hash_stored > self.store_period and cv2.compareHist(new_track.hash, self.hash, cv2.HISTCMP_CORREL) != 1:
+        # if time.time() - self.last_hash_stored > self.store_period and new_track.hash - self.hash != 0:
+            self.hash_memory.append(new_track.hash)
+            self.last_hash_stored = time.time()
         self.hash = new_track.hash
         self.bbox = new_track.bbox
         self.orientation = new_track.orientation
@@ -170,21 +173,23 @@ class STrack(BaseTrack):
         #     self.last_orientation_stored = time.time()
         #     if len(self.orientation_memory) > 0:
         #         self.orientation = sum(self.orientation_memory) / len(self.orientation_memory)
-
-        # if time.time() - self.last_hash_stored > self.store_period:
-            # self.hash_memory.append(new_track.hash)
-            # self.last_hash_stored = time.time()
         self.score = new_track.score
+
+    def set_associated_legs(self, legs_name):
+        self.associated_legs = legs_name
+
+    def refresh_memory(self, memory):
+        self.hash_memory = memory
 
     def __repr__(self):
         return 'OT_{}_({}-{})'.format(self.track_id, self.start_frame, self.end_frame)
 
 class HashTracker(object):
-    def __init__(self, frame_rate=30, buffer_=90, kalman_enabled=True):
+    def __init__(self, frame_rate=30, buffer_=15, kalman_enabled=True):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
         self.removed_stracks = []  # type: list[STrack]
-        self.match_thresh = 0.99999999
+        self.match_thresh = 1
         self.frame_id = 0
         self.track_thresh = 0.4
         self.det_thresh = self.track_thresh + 0.1
@@ -195,20 +200,115 @@ class HashTracker(object):
         self.kalman_filter = KalmanFilter()
 
         # Metrics ponderation
-        self.k_hash = 1
-        self.k_iou = 0
+        self.k_hash = 0.9
+        self.k_iou = 0.1
 
         # For specific element mode
-        self.tracked_element = None
         self.chosen_track = -1
 
-    def update(self, scores, bboxes, clases, images, hash, poses, orientation):
+    def set_chosen_track(self, track_id):
+        self.chosen_track = track_id
+
+    def update(self, scores, bboxes, clases, images, hash, poses, orientations):
+        # print("self.tracked_stracks", self.tracked_stracks)
+        # print("self.lost_stracks", self.lost_stracks)
+        if not self.tracked_stracks and not self.lost_stracks:
+            self.chosen_track = -1
+        # Cleaning not followed tracks
+        if self.chosen_track != -1:
+            self.tracked_stracks = [track for track in self.tracked_stracks if track.track_id == self.chosen_track]
+            self.lost_stracks = [track for track in self.lost_stracks if track.track_id == self.chosen_track]
+            return self.update_element_following(scores, bboxes, clases, images, hash, poses, orientations)
+        else:
+            return self.update_original(scores, bboxes, clases, images, hash, poses, orientations)
+
+    def update_element_following(self, scores, bboxes, clases, images, hash, poses, orientation):
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
         lost_stracks = []
         removed_stracks = []
 
+        if len(bboxes) > 0:
+            '''Detections'''
+            detections = [STrack(bbox, pose, s, clase, image, hash, orientation) for
+                          (bbox, pose, s, clase, image, hash, orientation) in zip(bboxes, poses, scores, clases, images, hash, orientation)]
+        else:
+            detections = []
+
+        ''' Add newly detected tracklets to tracked_stracks'''
+        unconfirmed = []
+        tracked_stracks = []  # type: list[STrack]
+        for track in self.tracked_stracks:
+            if not track.is_activated:
+                unconfirmed.append(track)
+            else:
+                tracked_stracks.append(track)
+        strack_pool = self.joint_stracks(tracked_stracks, self.lost_stracks)
+
+        if self.enable_kalman:
+            STrack.multi_predict(strack_pool)
+
+        if len(detections) > 0:
+            ''' Step 2: First association, with high score detection boxes'''
+            # # Predict the current location with KF
+            dists_hash = self.k_hash * matching.hash_distance_following(strack_pool, detections)
+            dists_iou = self.k_iou * matching.iou_distance(strack_pool, detections)
+
+            combinated_dists = dists_hash + dists_iou
+
+            # For associating with detections score
+            pos_match, filtered_memory = matching.get_max_similarity_detection(combinated_dists, strack_pool[0].hash_memory)
+            # self.tracked_stracks[0].refresh_memory(filtered_memory)
+            # print("NEW TRACK MEMORY SIZE:", len(self.tracked_stracks[0].hash_memory))
+            if pos_match == -1:
+                pass
+                # for it in strack_pool:
+                #         if not it.state == TrackState.Lost:
+                #             it.mark_lost()
+                #             lost_stracks.append(it)
+            else:
+                track = strack_pool[0]
+                det = detections[pos_match]
+                if track.state == TrackState.Tracked:
+                    track.update(detections[pos_match], self.frame_id)
+                    activated_starcks.append(track)
+                else:
+                    track.re_activate(det, self.frame_id, new_id=False)
+                    refind_stracks.append(track)
+        # else:
+        #     for it in strack_pool:
+        #         if not it.state == TrackState.Lost:
+        #             it.mark_lost()
+        #             lost_stracks.append(it)
+
+        # # """ Step 5: Update state"""
+        # for track in self.lost_stracks:
+        #     if self.frame_id - track.end_frame > self.max_time_lost:
+        #         track.mark_removed()
+        #         removed_stracks.append(track)
+
+        # self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]
+        # self.tracked_stracks = self.joint_stracks(self.tracked_stracks, activated_starcks)
+        # self.tracked_stracks = self.joint_stracks(self.tracked_stracks, refind_stracks)
+        # self.lost_stracks = self.sub_stracks(self.lost_stracks, self.tracked_stracks)
+        # self.lost_stracks.extend(lost_stracks)
+        # self.lost_stracks = self.sub_stracks(self.lost_stracks, self.removed_stracks)
+        # self.removed_stracks.extend(removed_stracks)
+        # self.tracked_stracks, self.lost_stracks = self.remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
+        # # # get scores of lost tracks
+        # output_stracks = [track for track in self.tracked_stracks if track.is_activated]
+        # output_stracks.extend(self.lost_stracks)
+
+        return self.tracked_stracks
+
+    def update_original(self, scores, bboxes, clases, images, hash, poses, orientation):
+        self.frame_id += 1
+        activated_starcks = []
+        refind_stracks = []
+        lost_stracks = []
+        removed_stracks = []
+        print("POSES:", poses)
         remain_inds = scores > self.track_thresh
         inds_low = scores > 0.1
         inds_high = scores < self.track_thresh
@@ -252,10 +352,8 @@ class HashTracker(object):
         dists_hash = self.k_hash * matching.hash_distance(strack_pool, detections)
         dists_iou = self.k_iou * matching.iou_distance(strack_pool, detections)
         combinated_dists = dists_hash + dists_iou
-
         dists = matching.fuse_score(combinated_dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.match_thresh)
-
         for itracked, idet in matches:
             track = strack_pool[itracked]
             det = detections[idet]
@@ -335,10 +433,12 @@ class HashTracker(object):
         self.lost_stracks = self.sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
         self.tracked_stracks, self.lost_stracks = self.remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
+        # print("self.tracked_stracks 2", self.tracked_stracks)
+        # print("self.lost_stracks 2", self.lost_stracks)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
         output_stracks.extend(self.lost_stracks)
-        return output_stracks
+        return self.tracked_stracks
 
     def joint_stracks(self, tlista, tlistb):
         exists = {}
@@ -366,9 +466,12 @@ class HashTracker(object):
 
 
     def remove_duplicate_stracks(self, stracksa, stracksb):
-        pdist_hash = 1 - self.k_hash * matching.hash_distance(stracksa, stracksb)
+        pdist_hash = self.k_hash * matching.hash_distance(stracksa, stracksb)
+        print(pdist_hash)
         pdist_iou = 1 - self.k_iou * matching.iou_distance(stracksa, stracksb)
-        pairs = np.where((pdist_iou < self.k_iou * 0.15) | (pdist_hash < self.k_hash * 0.20))
+        # print("stracksa", stracksa)
+        # print("stracksb", stracksb)
+        pairs = np.where((pdist_iou < self.k_iou * 0.15) & (pdist_hash < self.k_hash * 0.09))
         dupa, dupb = list(), list()
         for p, q in zip(*pairs):
             timep = stracksa[p].frame_id - stracksa[p].start_frame
@@ -397,3 +500,14 @@ class HashTracker(object):
         # print("repeated_objects", repeated_objects)
         filtered_objects = [track for track in objects if track.track_id not in repeated_objects]
         return filtered_objects
+    
+    def associate_leg_detector_with_track(self, association_matrix, detected_legs):
+        # First int for visual pose       
+        for association in association_matrix:
+            strack_index, detected_leg_index = int(association[0]), int(association[1])
+            
+            strack = self.tracked_stracks[strack_index]
+            detected_leg_name = detected_legs[detected_leg_index].name
+            
+            strack.set_associated_legs(detected_leg_name)
+

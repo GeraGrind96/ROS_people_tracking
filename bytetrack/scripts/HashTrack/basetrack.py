@@ -25,6 +25,8 @@ class BaseTrack(object):
     frame_id = 0
     time_since_update = 0
 
+    max_count = 50
+
     # multi-camera
     location = (np.inf, np.inf)
 
@@ -34,12 +36,17 @@ class BaseTrack(object):
 
     @staticmethod
     def next_id():
+        if BaseTrack._count == 50:
+            BaseTrack._count = 1
         BaseTrack._count += 1
+        
         return BaseTrack._count
 
     @staticmethod
     def next_class_id(clase):
         if clase in BaseTrack._class_count.keys():
+            if BaseTrack._class_count[clase] == BaseTrack.max_count:
+                BaseTrack._class_count[clase] = 1
             BaseTrack._class_count[clase] += 1
         else:
             BaseTrack._class_count[clase] = 1

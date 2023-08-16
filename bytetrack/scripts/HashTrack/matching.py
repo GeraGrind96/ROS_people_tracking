@@ -56,30 +56,43 @@ def hash_distance_following(followed_track, btracks):
 
     :rtype cost_matrix np.ndarray
     """
-
     if (len(followed_track)>0 and isinstance(followed_track[0], np.ndarray)) or (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
         ahashs = followed_track
         bhashs = btracks
     else:
         ahashs = [track.hash_memory for track in followed_track]
         bhashs = [track.hash for track in btracks]
-    _hashes = hashes(ahashs, bhashs)
+    _hashes = histograms(ahashs[0], bhashs)
 
     cost_matrix = check_for_classes(followed_track, btracks, _hashes)
     return cost_matrix
 
-def get_max_similarity_detection(distances_matrix):
-
-    filtered_array = remove_arrays_with_values_under_value(distances_matrix, 0.15)
+def get_max_similarity_detection(distances_matrix, hash_memory):
+    print("distances_matrix", distances_matrix)
+    
+    filtered_array, filtered_memory = remove_arrays_with_values_under_value(distances_matrix, hash_memory, 0.45)
+    print("filtered_array", filtered_array)
     min_value_by_memory = np.argmin(filtered_array, axis=-1)
+    
+    # print("min_value_by_memory", min_value_by_memory)
     counts = np.bincount(min_value_by_memory)
+    # print("counts", counts)
     if len(counts) == 0:
-        return -1
-    return np.argmax(counts)
+        return -1, []
+    else:
+        print("TIMES MATCHED:", counts[np.argmax(counts)])
+        print("PROPORTION RESPECT TOTAL MEMORY:", 0.9 * len(distances_matrix[0]))
+        if counts[np.argmax(counts)] > 0.9 * len(distances_matrix[0]):
+            return np.argmax(counts), filtered_memory
+        else:
+            return -1, []
 
-def remove_arrays_with_values_under_value(array, value):
+def remove_arrays_with_values_under_value(array, hash_memory, value):
+    hash_memory = np.array(hash_memory)
     array_mask = np.any(array <= value, axis=-1)
-    return array[array_mask]
+    result_memory = hash_memory[array_mask[0]]
+
+    return array[array_mask], result_memory.tolist()
 
 def hash_distance(atracks, btracks):
     """
@@ -96,7 +109,7 @@ def hash_distance(atracks, btracks):
     else:
         ahashs = [track.hash for track in atracks]
         bhashs = [track.hash for track in btracks]
-    _hashes = hashes(ahashs, bhashs)
+    _hashes = histograms(ahashs, bhashs)
     cost_matrix = check_for_classes(atracks, btracks, _hashes)
     return cost_matrix
 
@@ -116,8 +129,21 @@ def hashes(ahashs, bhashs):
         np.ascontiguousarray(ahashs),
         np.ascontiguousarray(bhashs)
     )
-
     return hashes / 42
+
+def histograms(ahashs, bhashs):
+    histograms = np.zeros((len(ahashs), len(bhashs)))
+    if histograms.size == 0:
+        return histograms
+
+    histograms1 = np.ascontiguousarray(ahashs)
+    histograms2 = np.ascontiguousarray(bhashs)
+    similarity_matrix = np.zeros((len(histograms1), len(histograms2)))
+    for i, hist1 in enumerate(histograms1):
+        for j, hist2 in enumerate(histograms2):
+            similarity = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+            similarity_matrix[i, j] = similarity
+    return 1 - similarity_matrix 
 
 def iou_distance(atracks, btracks):
     """
@@ -230,3 +256,4 @@ def fuse_score(cost_matrix, detections):
     fuse_sim = iou_sim * det_scores
     fuse_cost = 1 - fuse_sim
     return fuse_cost
+    
