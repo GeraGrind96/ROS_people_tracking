@@ -27,7 +27,7 @@ from cython_bbox import bbox_overlaps as bbox_ious
 torch.cuda.empty_cache() 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.6,max_split_size_mb:128"
 
-sys.path.append('/home/gerardo/software/JointBDOE')
+sys.path.append('/home/robolab/software/JointBDOE')
 from utils.torch_utils import select_device
 from utils.general import check_img_size, scale_coords, non_max_suppression
 from utils.datasets import LoadImages
@@ -40,7 +40,7 @@ import tf
 import message_filters
 import torch
 
-sys.path.append('/home/gerardo/software/BOSCH-Age-and-Gender-Prediction/models')
+sys.path.append('/home/robolab/software/BOSCH-Age-and-Gender-Prediction/models')
 from base_block import FeatClassifier, BaseClassifier
 from resnet import resnet50
 from collections import OrderedDict
@@ -98,9 +98,9 @@ class yolov8():
         self.model_v8 = YOLO(self.yolo_model_name)
 
         self.device = select_device("0", batch_size=1)
-        self.model = attempt_load("/home/gerardo/software/JointBDOE/runs/JointBDOE/coco_s_1024_e500_t020_w005/weights/best.pt", map_location=self.device)
+        self.model = attempt_load("/home/robolab/software/JointBDOE/runs/JointBDOE/coco_s_1024_e500_t020_w005/weights/best.pt", map_location=self.device)
         self.stride = int(self.model.stride.max())
-        with open("/home/gerardo/software/JointBDOE/data/JointBDOE_weaklabel_coco.yaml") as f:
+        with open("/home/robolab/software/JointBDOE/data/JointBDOE_weaklabel_coco.yaml") as f:
             self.data = yaml.safe_load(f)  # load data dict
         
 ################# SUBSCRIBER CALLBACKS #################
@@ -435,7 +435,7 @@ class yolov8():
 
     def load_age_predictor_state_dict(self, model):
 
-        PATH_TO_AGE_GENDER_PREDICTOR_CHECKPOINT = '/home/gerardo/software/BOSCH-Age-and-Gender-Prediction/exp_result/PETA/PETA/img_model/ckpt_max.pth'
+        PATH_TO_AGE_GENDER_PREDICTOR_CHECKPOINT = '/home/robolab/software/BOSCH-Age-and-Gender-Prediction/exp_result/PETA/PETA/img_model/ckpt_max.pth'
 
         loaded = torch.load(PATH_TO_AGE_GENDER_PREDICTOR_CHECKPOINT, map_location=torch.device("cuda:0"))
 

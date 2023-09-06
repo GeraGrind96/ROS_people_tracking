@@ -5,30 +5,30 @@ import sys
 import os
 from yolov8_data.msg import Object, ObjectsMSG
 from yolov8_data.srv import *
-from sensor_msgs.msg import Image as msg_Image
-from sensor_msgs.msg import CameraInfo as msg_CameraInfo
-from sensor_msgs.msg import CompressedImage as msg_CompressedImage
-from sensor_msgs.msg import PointCloud2 as msg_PointCloud2
+from sensor_msgs.msg import *
 from geometry_msgs.msg import *
 from nav_msgs.msg import *
 import numpy as np
 import cupy as cp
+from cv_bridge import CvBridge, CvBridgeError
 import cv2
 import queue
 import yaml
-from PIL import Image
 import torch
 import copy
 import gc
 from signal import signal, SIGINT
+from collections import Counter
+import argparse
 
 import lap
 from cython_bbox import bbox_overlaps as bbox_ious
 
-torch.cuda.empty_cache() 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.6,max_split_size_mb:128"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
-sys.path.append('/home/gerardo/software/JointBDOE')
+package_folder = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.append(package_folder + '/3rdparty/JointBDOE')
 from utils.torch_utils import select_device
 from utils.general import check_img_size, scale_coords, non_max_suppression
 from utils.datasets import LoadImages
@@ -41,14 +41,14 @@ import tf
 import message_filters
 import torch
 
-sys.path.append('/home/gerardo/software/BOSCH-Age-and-Gender-Prediction/models')
+sys.path.append(package_folder + '/3rdparty/BOSCH-Age-and-Gender-Prediction/models')
 from base_block import FeatClassifier, BaseClassifier
 from resnet import resnet50
 from collections import OrderedDict
 import torchvision.transforms as T
 
 class yolov8():
-    def __init__(self):
+    def __init__(self, real_robot, compressed_image):
         self.image_queue = queue.Queue(1)
         self.objects_publisher = rospy.Publisher("/perceived_people", ObjectsMSG, queue_size=10)
         self.objects_write = []
@@ -56,21 +56,22 @@ class yolov8():
         self.camera_info = None
 
         self.depth_image = []
-        self.color_image = []
+        self.color_image = []     
 
-        self.robot_world_transform_matrix = np.array([])
-        self.robot_orientation = None
-        self.camera_pose_respect_robot = np.array([[1, 0, 0, 0.21331892690256105],
-                                                    [0, 1, 0, 0.004864029093594846],
-                                                    [0, 0, 1, -0.9769708264898666],
-                                                    [0,   0,   0,   1]])
+        self.display = True
+        self.real_robot = real_robot
 
-        # self.init_person_classifier()
-
-        self.load_orientation_model()
-
-        self.width = 640
-        self.height = 480
+        self.compressed_image = compressed_image
+        if self.real_robot:
+            self.width = 960
+            self.height = 540
+            self.vertical_FOV = 0.75
+            self.horizontal_FOV = 1.22
+        else:
+            self.width = 640
+            self.height = 480
+            self.vertical_FOV = 0.785
+            self.horizontal_FOV = 1.01
 
         self.color_depth_ratio = None
         self.color_yolo_ratio_height = None
@@ -78,53 +79,72 @@ class yolov8():
 
         self.new_data = False
 
-        self.yolo_model_name = 'yolov8n-seg.engine'
+        self.tf_listener = tf.TransformListener()
 
-        self.model_v8 = YOLO(self.yolo_model_name)
+        self.cv_bridge = CvBridge()
+
+        # CV text
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        self.fontScale = 0.7
+        self.color = (255, 255, 0)
+        self.thickness = 2
+
+        # Models
+        self.model_v8_pose = YOLO(package_folder +'/3rdparty/YOLO_models/yolov8n-pose.pt')
+        self.model_v8_seg = YOLO(package_folder +'/3rdparty/YOLO_models/yolov8n-seg.engine')
+        self.load_orientation_model()
+        # self.init_person_classifier()
+
+        if self.compressed_image:
+            rgb_subscriber = message_filters.Subscriber("/rgb/compressed", CompressedImage)
+            depth_subscriber = message_filters.Subscriber("/depth/compressed", CompressedImage)
+        else:
+            rgb_subscriber = message_filters.Subscriber("/xtion/rgb/image_raw", Image)
+            depth_subscriber = message_filters.Subscriber("/xtion/depth/image_raw", Image)
+        
+        ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber], 3)
+        ts.registerCallback(yolo.store_data)
+        rospy.spin()
 
 ################# SUBSCRIBER CALLBACKS #################
 
-    def store_data(self, rgb, depth, odom):
-        # print("STORING DATA")
-        self.color_image = cv2.cvtColor(np.frombuffer(rgb.data, np.uint8).reshape(rgb.height, rgb.width, 4), cv2.COLOR_RGBA2RGB )
-        self.depth_image = np.frombuffer(depth.data, np.float32).reshape(depth.height, depth.width, 1)
-
-        euler_rotation = tf.transformations.euler_from_quaternion([odom.pose.pose.orientation.x, odom.pose.pose.orientation.y, odom.pose.pose.orientation.z, odom.pose.pose.orientation.w])
-        self.robot_orientation = euler_rotation[2]
-        self.robot_world_transform_matrix = np.array([[math.cos(euler_rotation[2]), -math.sin(euler_rotation[2]), 0, odom.pose.pose.position.x],
-                        [math.sin(euler_rotation[2]), math.cos(euler_rotation[2]), 0, odom.pose.pose.position.y],
-                        [0, 0, 1, odom.pose.pose.position.z],
-                        [0,   0,   0,   1]])
-        self.new_data = True
+    # def store_data(self, rgb, depth, odom):
+    def store_data(self, rgb, depth):
+    if self.compressed_image:
+        self.color_image = self.cv_bridge.compressed_imgmsg_to_cv2(rgb, "rgb8")
+        self.depth_image = self.cv_bridge.compressed_imgmsg_to_cv2(depth)
+    else:
+        self.color_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
+        self.depth_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
+        
+    self.get_yolo_objects()
         
 ################# DATA OBTAINING #################
 
-    def get_people_data(self, img, depth, robot_trans_matrix, robot_orientation):
+    def get_people_data(self, img, depth):
         t1 = time.time()
         img0 = copy.deepcopy(img)
         img = letterbox(img, 640, stride=self.stride, auto=True)[0]
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
         img = np.ascontiguousarray(img)
         img = torch.from_numpy(img).to(self.device)
-        img = img / 255.0  # 0 - 255 to 0.0 - 1.0
-        print("T1:", time.time() - t1)
-        t2 = time.time()
+        img = img / 255.0  # 0 - 255 to 0.0 - 1.0       
 
         if len(img.shape) == 3:
             img = img[None]  # expand for batch dim
 
         # Make inference with both models
-        
+        t2 = time.time()
         out_ori = self.model(img, augment=True, scales=[1])[0]
-        out_v8 = self.model_v8.predict(img0, classes=0, show_conf=True)
-        print("T2:", time.time() - t2)
-        t3 = time.time()        
+        t3 = time.time()  
+        # out_v8_seg = self.model_v8_seg.predict(img0, classes=0, show_conf=True)
+        out_v8_pose = self.model_v8_pose.predict(img0, classes=0, show_conf=True)
+              
         # YOLO V8 data processing
-        bboxes, confidences, poses, masks = self.get_segmentator_data(out_v8, img0, depth, robot_trans_matrix)
-        print("T3:", time.time() - t3)
-        t4 = time.time()    
-        # print("T3 T4:", t4 - t3)    
-        # Orientation model data processing
+        # bboxes, confidences, poses, masks = self.get_segmentator_data(out_v8_seg, img0, depth, robot_trans_matrix)
+        bboxes, confidences, poses, masks = self.get_pose_data(out_v8_pose, img0, depth)
+
+        # # Orientation model data processing
 
         out = non_max_suppression(out_ori, 0.3, 0.5, num_angles=self.data['num_angles'])
         orientation_bboxes = scale_coords(img.shape[2:], out[0][:, :4], img0.shape[:2]).cpu().numpy().astype(int)  # native-space pred
@@ -132,56 +152,118 @@ class yolov8():
         
         # Hungarian algorithm for matching people from segmentation model and orientation model
 
-        matches = self.associate_orientation_with_segmentation(orientation_bboxes, bboxes)
+        matches = self.associate_orientation_with_segmentation(bboxes, orientation_bboxes)
 
-        associated_orientations = []
+        people_poses = []
         for i in range(len(matches)):
-            for j in range(len(matches)):
-                if i == matches[j][1]:
-                    # transformed_pose = tf.transformations.quaternion_from_euler(0, 0, math.radians(orientations[matches[j][0]][0]) - math.pi) 
-                    # transformed_pose_quaternion = Quaternion(x=transformed_pose[0], y=transformed_pose[1], z=transformed_pose[2], w=transformed_pose[3])
-                    # associated_orientations.append(transformed_pose_quaternion)
-                    associated_orientations.append(self.transform_orientation_to_world_reference(math.radians(orientations[matches[j][0]][0]), robot_orientation))
-                    break
-        print("T4:", time.time() - t4)
+            pose_respect_to_camera = poses[matches[i][0]]
+            orientation = tf.transformations.quaternion_from_euler(0, 0, math.radians(orientations[matches[i][1]][0]) - math.pi)    
+            pose_stamped = PoseStamped()
+            pose_stamped.header.stamp = rospy.Time(0)
+            pose_stamped.header.frame_id = "base_footprint" 
+            pose = Pose()
+            pose.orientation = Quaternion(x=orientation[0], y=orientation[1], z=orientation[2], w=orientation[3])
+            pose.position.x = pose_respect_to_camera[0]
+            pose.position.y = -pose_respect_to_camera[1]
+            pose.position.z = 0.0
+            pose_stamped.pose = pose
+            transformed_pose = self.tf_listener.transformPose("map", pose_stamped)
+            people_poses.append(transformed_pose)
         if len(bboxes) == 0:
-            return [], [], [], [], []
-        return bboxes, confidences, associated_orientations, poses, masks
+            return [], [], [], []
+        return bboxes, confidences, people_poses, masks
 
-    def get_pose_data(self, result, depth_image, robot_trans_matrix, frame):
+    def get_pose_data(self, result, color_image, depth_image):
         pose_bboxes = []
         pose_poses = []
         pose_confidences = []
+        pose_masks = []
         for result in result:
             if result.keypoints != None and result.boxes != None:
                 boxes = result.boxes
                 keypoints = result.keypoints.xy.cpu().numpy().astype(int)
                 if len(keypoints) == len(boxes):
                     for i in range(len(keypoints)):
-                        person_bbox = boxes[i].xyxy.cpu().numpy().astype(int)[0] 
-                        if len(keypoints[i]) > 0: 
-                            x_avg = (keypoints[i][5, 0] + keypoints[i][6, 0]) / 2
-                            y_avg = (keypoints[i][5, 1] + keypoints[i][6, 1]) / 2
-                            if x_avg < 100 or x_avg > self.width - 100:
-                                continue
-                            neck_point = np.array([x_avg, y_avg]).astype(int)
-                            gender_pred, age_pred = self.get_pred_attributes(frame, person_bbox[0], person_bbox[1], person_bbox[2], person_bbox[3])
-                            person_pose = self.get_neck_distance(neck_point, depth_image, robot_trans_matrix)
-                            pose_poses.append(person_pose)
-                            pose_bboxes.append(person_bbox)
-                            pose_confidences.append(boxes[i].conf.cpu().numpy()[0])   
-        return pose_bboxes, pose_confidences, pose_poses
+                        person_confidence = boxes[i].conf.cpu().numpy()[0]
+                        if person_confidence > 0.8:
+                            person_bbox = boxes[i].xyxy.cpu().numpy().astype(int)[0] 
+                            if len(keypoints[i]) > 0: 
+                                interesting_points_color = [keypoints[i][5], keypoints[i][6], keypoints[i][7], keypoints[i][8], keypoints[i][11], keypoints[i][12], keypoints[i][13], keypoints[i][14]]
+                                interesting_points_pose = [keypoints[i][5], keypoints[i][6], keypoints[i][11], keypoints[i][12]]
+                                # valid_pose = True
+                                # for j, keypoint in enumerate(keypoints[i]):
+                                #     cv2.circle(color_image, (keypoint[0], keypoint[1]), 2, (0, 255, 0), 1)
+                                #     color_image = cv2.putText(color_image, str(j), (int(keypoint[0]), int(keypoint[1])), self.font, self.fontScale, self.color, self.thickness, cv2.LINE_AA)
+                                #     keypoint[0] = keypoint[0] - 1 if keypoint[0] >= self.height else keypoint[0]
+                                #     keypoint[1] = keypoint[1] - 1 if keypoint[1] >= self.width else keypoint[1]
+                                #     if np.isinf(depth_image[keypoint[1], keypoint[0]]) or depth_image[keypoint[1], keypoint[0]] == 0:
+                                #         valid_pose = False
+                                #         break
+                                # if not valid_pose:
+                                #     print("REMOVED FOR NON VALID POSE")
+                                #     continue
+                                x_avg_up = (interesting_points_pose[0][0] + interesting_points_pose[1][0]) / 2
+                                y_avg_up = (interesting_points_pose[0][1] + interesting_points_pose[1][1]) / 2
+                                # x_avg_down = (interesting_points_pose[2][0] + interesting_points_pose[3][0]) / 2
+                                # y_avg_down = (interesting_points_pose[2][1] + interesting_points_pose[3][1]) / 2
+                                # # if x_avg < 40 or x_avg > self.width - 40:
+                                # #     continue
+                                neck_point = np.array([x_avg_up, y_avg_up]).astype(int)
+                                print(neck_point)
+                                # back_point = np.array([x_avg_down, y_avg_down]).astype(int)
+                                # gender_pred, age_pred = self.get_pred_attributes(frame, person_bbox[0], person_bbox[1], person_bbox[2], person_bbox[3])
+                                person_pose_up = self.get_neck_distance(neck_point, depth_image, interesting_points_pose[0], interesting_points_pose[1])
+                                # person_pose_down = self.get_neck_distance(back_point, depth_image)
+                                # print("PERSON POSE UP:", person_pose_up)
+                                # print("PERSON POSE DOWN:", person_pose_down)
+                                if np.isinf(person_pose_up[0]) or person_pose_up[0] == 0 or person_pose_up[0] > 5:
+                                    # print("REMOVED FOR NON VALID POSE 2")
+                                    continue                            
+                                pose_poses.append(person_pose_up)
+                                pose_bboxes.append(person_bbox)
+                                pose_confidences.append(person_confidence)   
+                                color_lines = [[interesting_points_color[0], interesting_points_color[1]], [interesting_points_color[3], interesting_points_color[1]], [interesting_points_color[0], interesting_points_color[2]], [interesting_points_color[4], interesting_points_color[6]], [interesting_points_color[5], interesting_points_color[7]]]
+                                person_mask = self.get_most_common_color(color_lines, color_image)
+                                # cv2.imshow("MASK", person_mask)
+                                pose_masks.append(person_mask)
+                        else:
+                            # print("REMOVED FOR NOT ENOUGHT CONFIDENCE")
+                            continue
+        # cv2.imshow("SKELETONS", color_image)
+        # cv2.waitKey(1)
+        return pose_bboxes, pose_confidences, pose_poses, pose_masks
 
+    def get_neck_distance(self, neck_point, depth_image, point_a, point_b):
+        depth_mean = 0
+        max_dist = 7
+        counter = 0  
+        range_vector_x = np.array([point_a[0], point_b[0]])
+        range_vector_y = np.array([point_a[1], point_b[1]])
+        max_value_x, min_value_x = np.max(range_vector_x), np.min(range_vector_x)
+        max_value_y, min_value_y = np.max(range_vector_y), np.min(range_vector_y)
+        last_depth_value = None
+        for x in range(np.clip(neck_point[0] - max_dist, min_value_x, max_value_x), np.clip(neck_point[0] + max_dist + 1, min_value_x, max_value_x)):
+            for y in range(np.clip(neck_point[1] - max_dist, min_value_y, max_value_y), np.clip(neck_point[1] + max_dist + 1, min_value_y, max_value_y)):
+                depth_value = int(depth_image[y, x])
+                if not np.isinf(depth_value) and depth_value != 0: 
+                    if last_depth_value is None:
+                        last_depth_value = depth_value
+                        depth_mean += depth_value
+                        counter += 1
+                    elif abs(depth_value - last_depth_value) > 100:
+                        if depth_value >= last_depth_value:
+                            counter, depth_mean, last_depth_value = 1, depth_value, depth_value
+                        else:
+                            continue
+                    else:
+                        depth_mean += depth_value
+                        counter += 1
 
-    def get_neck_distance(self, neck_point, depth_image, robot_trans_matrix):
-        neck_point[0] = neck_point[0] - 1 if neck_point[0] >= self.height else neck_point[0]
-        neck_point[1] = neck_point[1] - 1 if neck_point[1] >= self.width else neck_point[1]
-        if not np.isinf(depth_image[neck_point[1], neck_point[0]]):
-            neck_point_3d = self.depth_point_to_xyz(neck_point, depth_image[neck_point[1], neck_point[0]])
-            world_neck_point_3d = self.transform_pose_to_world_reference(neck_point_3d, robot_trans_matrix)
-            return world_neck_point_3d
+        if counter > 0:            
+            neck_point_3d = self.depth_point_to_xyz(neck_point, (depth_mean / (counter * 1000) ))
+            return neck_point_3d
         else:
-            return [np.inf, np.inf]
+            return [np.inf, np.inf, np.inf]
 
     def get_segmentator_data(self, results, color_image, depth_image, robot_trans_matrix):
         segmentation_bboxes = []
@@ -194,118 +276,83 @@ class yolov8():
                 boxes = result.boxes
                 if len(masks) == len(boxes):
                     for i in range(len(boxes)):
-                        print("IN LOOP")
                         # t1 = time.time()
                         # print("t1:", time.time() - t1)
                         # t2 = time.time()    
-                        image_mask = np.zeros((480, 640, 1), dtype=np.uint8)
+                        image_mask = np.zeros((self.height, self.width, 1), dtype=np.uint8)
                         act_mask = masks[i].astype(np.int32)
                         # print("t2:", time.time() - t2)
                         # t3 = time.time()
                         cv2.fillConvexPoly(image_mask, act_mask, (1, 1, 1))
                         # print("t3:", time.time() - t3)
-                        # t4 = time.time()
-                        image_mask = cp.array(image_mask)
-                        # rectangle_mask = np.zeros_like(image_mask)
-                        # rectangle_mask[person_bbox[0]:person_bbox[2]+1,
-                        #             person_bbox[1]:person_bbox[3]+1] = 1
-                        # filtered_mask = image_mask & rectangle_mask
-  
-                        person_pose = self.get_mask_distance(image_mask, depth_image, robot_trans_matrix, [])
+                        t4 = time.time()
+                        person_bbox = boxes[i].xyxy.cpu().numpy().astype(int)[0]
+                        image_mask = image_mask[person_bbox[1]:person_bbox[3], person_bbox[0]:person_bbox[2]]
+                        height, width, _ = image_mask.shape
+                        depth_image_mask = depth_image[person_bbox[1]:person_bbox[3], person_bbox[0]:person_bbox[2]]
+                        color_image_mask = color_image[person_bbox[1]:person_bbox[3], person_bbox[0]:person_bbox[2]]
+                        person_pose = self.get_mask_distance(image_mask[:height // 5, :], depth_image_mask[:height // 5, :], robot_trans_matrix, person_bbox)
                         if np.isinf(person_pose[0]):
-                            print("POSE INFINITA")
                             continue
                         segmentation_poses.append(person_pose)
-
-                        person_bbox = boxes[i].xyxy.cpu().numpy().astype(int)[0]
                         segmentation_bboxes.append(person_bbox)
                         segmentation_confidences.append(boxes[i].conf.cpu().numpy()[0])
                         
-                        # print("t4:", time.time() - t4)
-                        # t5 = time.time()
-                        color_image = cp.array(color_image)
-                        person_mask = self.get_mask_with_modified_background(image_mask, person_bbox, color_image)
-                        segmentation_masks.append(cp.asnumpy(person_mask))
-                        # print("t5:", time.time() - t5)
-                        # print("END LOOP")
+                        
+                        t5 = time.time()
+
+                        person_mask = self.get_mask_with_modified_background(image_mask, person_bbox, color_image_mask)
+                        segmentation_masks.append(person_mask)
         return segmentation_bboxes, segmentation_confidences, segmentation_poses, segmentation_masks
 
     def get_mask_with_modified_background(self, mask, bbox, image):
         masked_image = mask * image
-        roi = masked_image[bbox[1]:bbox[3], bbox[0]:bbox[2]]
-        h, w, _ = roi.shape
-        # black_pixels = np.where(np.all(roi == [0, 0, 0], axis=-1))
+        h, w, _ = masked_image.shape
+        is_black_pixel = np.logical_and(masked_image[:, :, 0] == 0, masked_image[:, :, 1] == 0, masked_image[:, :, 2] == 0)
+        masked_image[is_black_pixel] = [255, 255, 255]
+        return masked_image
 
-        background_color = roi[h // 2, w // 2]
-        is_black_pixel = cp.logical_and(roi[:, :, 0] == 0, roi[:, :, 1] == 0, roi[:, :, 2] == 0)
-    
-        roi[is_black_pixel] = background_color
+    def get_mask_with_pose(self, color, bbox, image):
+        image_mask = np.zeros((bbox[2]-bbox[0], bbox[3]-bbox[1], 3), dtype=np.uint8)
+        image_mask[:] = color
+        return image_mask
 
-        # non_black_pixels = np.where(np.all(roi != [0, 0, 0], axis=-1))
-        # non_black_values = roi[non_black_pixels]
-
-        # print(non_black_values)
-
-        # # Most common color
-        # red_channel = non_black_values[:,0]
-        # green_channel = non_black_values[:,1]
-        # blue_channel = non_black_values[:,2]
-
-        # # Calcula los histogramas de cada canal de color
-        # red_histogram = np.histogram(red_channel, bins=np.arange(0, 256))
-        # green_histogram = np.histogram(green_channel, bins=np.arange(0, 256))
-        # blue_histogram = np.histogram(blue_channel, bins=np.arange(0, 256))
-
-        # # Encuentra los valores de color más comunes en cada canal de color
-        # most_common_red = np.argmax(red_histogram[0])
-        # most_common_green = np.argmax(green_histogram[0])
-        # most_common_blue = np.argmax(blue_histogram[0])
-
-        # most_common_color = (most_common_red, most_common_green, most_common_blue)
-
-        # print("Color RGB más común:", most_common_color)
-        
-        # Mean of segmentation colors
-        # average_color = np.mean(non_black_values, axis=0)
-
-        # T-shirt color
-        # background_color = roi[int(h / 3), int(w / 2)]
-        # roi[black_pixels] = background_color
-        return roi
+    def get_most_common_color(self, lines, color_image):
+        total_points = []
+        for line in lines:
+            init = line[0]
+            end = line[1]
+            init[0] = init[0] if init[0] < self.width else self.width - 1
+            end[0] = end[0] if end[0] < self.width else self.width - 1
+            init[1] = init[1] if init[1] < self.height else self.height - 1
+            end[1] = end[1] if end[1] < self.height else self.height - 1
+            puntos_en_linea = np.linspace(init, end, num=20, dtype=np.int32)
+            total_points.extend(puntos_en_linea)
+        total_points = np.stack(total_points)
+        imagen = np.ones((10, len(total_points), 3), dtype=np.uint8) * 255
+        for i, punto in enumerate(total_points):
+            imagen[:, i] = tuple(color_image[punto[1], punto[0]])
+        return imagen
 
     def get_mask_distance(self, mask, depth_image, robot_trans_matrix, bbox):
-        depth_image = cp.array(depth_image)
-        segmentation_pixels = cp.argwhere(cp.all(mask == 1, axis=-1))
-        segmentation_points = cp.column_stack((segmentation_pixels[:, 1], segmentation_pixels[:, 0]))
-        valid_points_mask = ~cp.isinf(depth_image[segmentation_points[:, 1], segmentation_points[:, 0]])
-        valid_points = cp.compress(valid_points_mask, segmentation_points, axis=0)
-        mean_point = cp.asnumpy(cp.mean(valid_points, axis=0))
+            
+        segmentation_pixels = np.argwhere(np.all(mask == 1, axis=-1))
+        segmentation_points = np.column_stack((segmentation_pixels[:, 1], segmentation_pixels[:, 0]))
+        valid_points_mask = ~np.isinf(depth_image[segmentation_points[:, 1], segmentation_points[:, 0]])
+        valid_points = segmentation_points[valid_points_mask.flatten()]
         if len(valid_points) > 0:
+            mean_point = np.mean(valid_points, axis=0)
             depth_values = depth_image[valid_points[:, 1], valid_points[:, 0]]
-            mean_depth = float(cp.asnumpy(cp.mean(depth_values)))
-            print(mean_depth, mean_point)
-            xyz_points = self.depth_point_to_xyz([mean_point[0], mean_point[1]], mean_depth)
+            mean_depth = np.mean(depth_values)
+            xyz_points = self.depth_point_to_xyz([mean_point[0] + bbox[0], mean_point[1]+ bbox[1]], mean_depth)
             world_pose = self.transform_pose_to_world_reference(xyz_points, robot_trans_matrix)
-            return cp.asnumpy(world_pose)
+            return world_pose
         else:
             return [np.inf, np.inf]
         
-        # center_point = np.mean(first_20_rows, axis=0)
-        # print(bbox)
-        # x_central = bbox[0] + ((bbox[2] - bbox[0]) / 2)
-        # y_central = bbox[1] + ((bbox[3] - bbox[1]) / 2) 
-        # center_point = [x_central, y_central]
-        # # print(center_point)
-        # # center_depth = self.transform_pose_to_world_reference(self.depth_point_to_xyz(center_point, depth_image[int(center_point[1]), int(center_point[0])]), robot_trans_matrix)
-        # center_depth = self.transform_pose_to_world_reference(self.depth_point_to_xyz(center_point, depth_image[int(center_point[1]), int(center_point[0])]), robot_trans_matrix)
-        # return center_depth
-
     def associate_orientation_with_segmentation(self, seg_bboxes, ori_bboxes):
         dists = self.iou_distance(seg_bboxes, ori_bboxes)
         matches, unmatched_a, unmatched_b = self.linear_assignment(dists, 0.9)
-        # print("NO MATCHES A", unmatched_a)
-        # print("NO MATCHES b", unmatched_b)
-        # print("MATCHES", matches)
         return matches
 
     def linear_assignment(self, cost_matrix, thresh):
@@ -345,68 +392,18 @@ class yolov8():
 
         return ious
 
-    # def get_people_pose(self, people_bboxes, depth_image):
-    #     radius = 5
-    #     color = (0, 0, 255)  # Color en formato BGR (azul)
-    #     thickness = -1  # Relleno del círculo
-    #     people_poses = []
-    #     for person_bbox in people_bboxes:
-    #         cv2.rectangle(self.color_image, (int(person_bbox[0]), int(person_bbox[1])), (int(person_bbox[2]), int(person_bbox[3])), (255, 0, 0), 2)
-    #         x_range = int(person_bbox[0] + (person_bbox[2] - person_bbox[0]) / 2)
-    #         y_range = int(person_bbox[1] + (person_bbox[3] - person_bbox[1]) / 5)
-    #         # image_section = depth_image[int(person_bbox[3] / 5):int(person_bbox[3] / 4), x_range]
-    #         # print(image_section)
-    #         # # print(image_section)
-    #         # if image_section.size > 0: 
-    #         #     min_value = np.unravel_index(np.argmin(image_section), image_section.shape)  
-    #         # else: 
-    #         #     continue
-
-    #         if math.isinf(depth_image[y_range][x_range]):
-    #             image_section = depth_image[y_range, int(person_bbox[0]):int(person_bbox[2])]
-    #             print("SECTION X", int(person_bbox[2] / 4), int(person_bbox[2] * 3 / 4))
-    #             # print(image_section)
-    #             if image_section.size > 0: 
-    #                 print(image_section.shape)
-    #                 min_value = np.unravel_index(np.argmin(image_section), image_section.shape)  
-    #                 if not math.isinf(depth_image[y_range][min_value[0]]): 
-    #                     print("Min value:", min_value)
-    #                     from_robot_pose = self.depth_point_to_xyz([min_value[0] + person_bbox[0], y_range], depth_image[y_range][min_value[0] + person_bbox[0]])
-    #                     cv2.circle(self.color_image, (min_value[0] + person_bbox[0], y_range), radius, color, thickness)
-    #                 else:
-    #                     print("PROJECTED POINT:", x_range, person_bbox[3])
-    #                     cv2.circle(self.color_image, (x_range, person_bbox[3]), radius, color, thickness)
-    #                     from_robot_pose = self.calculate_depth_with_projection([x_range, person_bbox[3]])
-    #             else: 
-    #                 print("PROJECTED POINT:", x_range, person_bbox[3])
-    #                 cv2.circle(self.color_image, (x_range, person_bbox[3]), radius, color, thickness)
-    #                 from_robot_pose = self.calculate_depth_with_projection([x_range, person_bbox[3]])
-    #         else:
-    #             print("DEPTH POINT:", x_range, y_range)
-    #             cv2.circle(self.color_image, (x_range, y_range), radius, color, thickness)
-    #             from_robot_pose = self.depth_point_to_xyz([x_range, y_range], depth_image[y_range][x_range])
-    #         world_person_pose = self.transform_pose_to_world_reference(from_robot_pose)
-    #         people_poses.append(world_person_pose)
-    #     return people_poses
-    
-    def get_yolo_objects(self, event):
-        if self.new_data:
-            init = time.time()
-            depth_image = self.depth_image
-            color_image = self.color_image
-            robot_trans_matrix = self.robot_world_transform_matrix
-            robot_orientation = self.robot_orientation
-            bboxes, scores, orientations, poses, masks = self.get_people_data(color_image, depth_image, robot_trans_matrix, robot_orientation)
-            self.create_interface_data(bboxes, orientations, poses, scores, masks)
-            self.new_data = False
-            print("EXPENDED TIME:", time.time() - init)
+    def get_yolo_objects(self):
+        depth_image = self.depth_image
+        color_image = self.color_image
+        bboxes, scores, poses, masks = self.get_people_data(color_image, depth_image)
+        self.create_interface_data(bboxes, poses, scores, masks)
 
 ################# DATA STRUCTURATION #################
 
-    def create_interface_data(self, boxes, orientations, centers, scores, masks):
+    def create_interface_data(self, boxes, centers, scores, masks):
         objects = ObjectsMSG()
         objects.header.stamp = rospy.Time.now()
-        if len(boxes) == len(orientations) == len(centers) == len(scores) == len(masks):
+        if len(boxes) == len(centers) == len(scores) == len(masks):
             for index in range(len(boxes)):
                 act_object = Object()
                 act_object.type = 0
@@ -415,20 +412,9 @@ class yolov8():
                 act_object.right = boxes[index][2]
                 act_object.bot = boxes[index][3]
                 act_object.score = scores[index]
-                # bbx_center_depth = [int((act_object.left + (act_object.right - act_object.left)/2)), int((act_object.top + (act_object.bot - act_object.top)/2))]
-                act_object.pose = Pose()
-                act_object.pose.position.x = centers[index][0] 
-                act_object.pose.position.y = centers[index][1]
-
-                act_object.pose.orientation = orientations[index]
+                act_object.pose = centers[index]
                 y, x, _ = masks[index].shape
-                act_object.image = msg_Image(data=masks[index].tobytes(), height=y, width=x)
-
-                # output_folder = 'dataset_' + str(1)
-                # os.makedirs(output_folder, exist_ok=True)
-                # num_existing_files = len(os.listdir(output_folder))
-                # output_path = os.path.join(output_folder, str(num_existing_files) + ".png")
-                # cv2.imwrite(output_path, masks[index])
+                act_object.image = Image(data=masks[index].tobytes(), height=y, width=x)
                 
                 objects.objectsmsg.append(act_object)
             self.objects_publisher.publish(objects)
@@ -436,29 +422,24 @@ class yolov8():
     def get_bbox_image_data(self, image, element_box):
         cropped_image = image[int(element_box[1]):int(element_box[3]), int(element_box[0]):int(element_box[2])]
         y, x, _ = cropped_image.shape
-        return msg_Image(data=cropped_image.tobytes(), height=y, width=x)
+        return Image(data=cropped_image.tobytes(), height=y, width=x)
 
 ################# TO WORLD TRANSFORMATIONS #################
 
     def transform_pose_to_world_reference(self, person_pose, robot_trans_matrix):
-        # print(person_pose)
-        # person_world_position = np.dot(self.camera_pose_respect_robot, np.dot(robot_trans_matrix, np.array([person_pose[0], -person_pose[1], 0, 1])))
         person_world_position = np.dot(robot_trans_matrix, np.array([person_pose[0], -person_pose[1], 0, 1]))
-
+        person_pose = PoseStamped()
+        person_pose.pose.position.x = person_pose[0]
+        person_pose.pose.position.y = -person_pose[1]
+        person_pose.pose.position.z = 0
+        transformed_point = self.tf_listener.transformPoint("map", person_pose)
         return [round(person_world_position[0], 3), round(person_world_position[1], 3)]
     
-    def transform_orientation_to_world_reference(self, orientation, robot_orientation):
-        theta_world = robot_orientation + orientation
-        transformed_pose = tf.transformations.quaternion_from_euler(0, 0, -((math.pi)-np.arctan2(np.sin(theta_world), np.cos(theta_world)))) 
-        return Quaternion(x=transformed_pose[0], y=transformed_pose[1], z=transformed_pose[2], w=transformed_pose[3])
-
 ################# IMAGE POINTS TO DEPTH #################
 
     def depth_point_to_xyz(self, pixel, depth):
-        # angle_y = ((math.pi - 1.01)/2) + (pixel[1]*1.01/480)
-        # angle_z = ((2*math.pi) - 0.785/2) + (pixel[0]*0.785/640)
-        angle_y = ((math.pi - 0.785)/2) + (pixel[1]*0.785/480)
-        angle_z = ((2*math.pi) - 1.01/2) + (pixel[0]*1.01/640)
+        angle_y = ((math.pi - self.vertical_FOV)/2) + (pixel[1]*self.vertical_FOV/self.height)
+        angle_z = ((2*math.pi) - self.horizontal_FOV/2) + (pixel[0]*self.horizontal_FOV/self.width)
         y_distance = depth / math.tan(angle_y)
         z_distance = depth * math.tan(angle_z)
         return depth, z_distance, y_distance
@@ -503,7 +484,7 @@ class yolov8():
 
     def load_age_predictor_state_dict(self, model):
 
-        PATH_TO_AGE_GENDER_PREDICTOR_CHECKPOINT = '/home/gerardo/software/BOSCH-Age-and-Gender-Prediction/exp_result/PETA/PETA/img_model/ckpt_max.pth'
+        PATH_TO_AGE_GENDER_PREDICTOR_CHECKPOINT = package_folder + '/3rdparty/BOSCH-Age-and-Gender-Prediction/exp_result/PETA/PETA/img_model/ckpt_max.pth'
 
         loaded = torch.load(PATH_TO_AGE_GENDER_PREDICTOR_CHECKPOINT, map_location=torch.device("cuda:0"))
 
@@ -526,9 +507,9 @@ class yolov8():
 
     def load_orientation_model(self):
         self.device = select_device("0", batch_size=1)
-        self.model = attempt_load("/home/gerardo/software/JointBDOE/runs/JointBDOE/coco_s_1024_e500_t020_w005/weights/best.pt", map_location=self.device)
+        self.model = attempt_load(package_folder + "/3rdparty/JointBDOE/runs/JointBDOE/coco_s_1024_e500_t020_w005/weights/best.pt", map_location=self.device)
         self.stride = int(self.model.stride.max())
-        with open("/home/gerardo/software/JointBDOE/data/JointBDOE_weaklabel_coco.yaml") as f:
+        with open(package_folder + "/3rdparty/JointBDOE/data/JointBDOE_weaklabel_coco.yaml") as f:
             self.data = yaml.safe_load(f)  # load data dict
 
 def handler(signal_received, frame):
@@ -541,23 +522,28 @@ def handler(signal_received, frame):
 ################# MAIN #################
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()compressed_image
+    parser.add_argument('--real_robot', type=int)
+    args, unknown = parser.parse_known_args()
+    parser.add_argument('--compressed_image', type=int)
+    real_robot = args.real_robot
+    compressed_image = args.compressed_image
+
+    if real_robot:
+        real_robot = True
+        print("Real robot setted")
+    else:
+        print("Real robot not setted")
+
+    if compressed_image:
+        compressed_image = True
+        print("Using compressed image")
+    else:
+        print("Compressed image not used")
+
     rospy.init_node("yolov8")
     rospy.loginfo("yolov8 node has been started")
-
     signal(SIGINT, handler)
+    yolo = yolov8(real_robot, compressed_image)
 
-    yolo = yolov8()
-    # rospy.wait_for_service('bytetrack_srv')
-    # rgb_subscriber = message_filters.Subscriber("/video_testing", msg_Image)
-    rgb_subscriber = message_filters.Subscriber("/xtion/rgb/image_raw", msg_Image)
-    depth_subscriber = message_filters.Subscriber("/xtion/depth/image_raw", msg_Image)
-    odom_subscriber = message_filters.Subscriber("/camera_odom", Odometry)
-    
-    ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber, odom_subscriber], 5)
-    ts.registerCallback(yolo.store_data)
-    rospy.Timer(rospy.Duration(0.033), yolo.get_yolo_objects)
-    rospy.spin()
 
-    # rospy.logwarn("Warning test message")
-    # rospy.logerr("Error test message")
-    # rospy.loginfo("End of program")

@@ -1,5 +1,8 @@
+#!/usr/bin/env python3
+
 import rospy
 from yolov8_data.msg import *
+from yolov8_data.srv import *
 from geometry_msgs.msg import *
 from nav_msgs.msg import *
 from people_msgs.msg import PositionMeasurementArray, People, PersonStamped
@@ -11,38 +14,54 @@ from PIL import Image
 import tf
 import math
 import message_filters
-sys.path.append('HashTrack')
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)) + '/HashTrack')
 from hash import HashTracker
+from basetrack import TrackState
 import lap
 import time
 import cv2
 
 class bytetrack():
     def __init__(self) -> None:
-        self.tracker = HashTracker(frame_rate=30)
-        # self.objects_data = ObjectsSRVResponse()
-        self.tracked_objects_write, self.tracked_objects_read = [], []
+        self.tracker = HashTracker(frame_rate=25)
         self.yolo_people = []
-        self.new_yolo_people = False
-        self.leg_detection_people = []
-        self.new_leg_detection_people = False
+        # self.leg_detection_people = []
+        # self.new_leg_detection_people = False
+        self.followed_person_id = -1
 
+        self.stop_speed_threshold = 0.1
+
+        rospy.init_node("people_tracker")
+        rospy.loginfo("People tracker node has been started")
+
+        self.people_publisher = rospy.Publisher("/tracked_people", ObjectsMSG, queue_size=5)
+        yolo_people_subscriber = rospy.Subscriber("/perceived_people", ObjectsMSG, self.set_new_yolo_people)
+
+        # For also using leg detection
+        # leg_detector_people_subscriber = rospy.Subscriber("/people", People, bytetracker.set_new_leg_detection_people)
+        # yolo_people_subscriber = message_filters.Subscriber("/perceived_people", ObjectsMSG)
+        # leg_detector_people_subscriber = message_filters.Subscriber("/people", People)
+        # people_sync = message_filters.ApproximateTimeSynchronizer([yolo_people_subscriber, leg_detector_people_subscriber], queue_size=1, slop=0.1)
+        # people_sync.registerCallback(bytetracker.set_new_people_data)
+
+        rospy.Service("set_id", SetID, self.set_chosen_track)
+        rospy.spin()
         self.tf_listener = tf.TransformListener()
         
-    # def set_new_yolo_people(self, data):
-    #     if len(data.objectsmsg) > 0:
-    #         print("YOLO")
-    #         self.yolo_people = data.objectsmsg
-    #         self.new_yolo_people = True
+    def set_new_yolo_people(self, data):
+        self.yolo_people = data.objectsmsg
+        self.execute_bytetrack()
 
-    # def set_new_leg_detection_people(self, data):
-    #     if len(data.people) > 0:
-    #         print("LEGS")
-    #         self.leg_detection_people = data
-    #         self.new_leg_detection_people = True
-
-    def set_chosen_track(self, id):
-        self.tracker.set_chosen_track(id.data)
+    def set_chosen_track(self, req):
+        ret = ""
+        if req.id != self.followed_person_id:
+            ret = "new"
+        else:
+            ret = "same"
+        self.followed_person_id = req.id
+        self.tracker.set_chosen_track(req.id)
+        return SetIDResponse(ret)
 
     def set_new_people_data(self, yolo_data, leg_detection_data):
         # if len(yolo_data.objectsmsg) > 0:
@@ -56,62 +75,78 @@ class bytetrack():
         #         self.leg_detection_people.people[i].position = self.transformate_legs_pose_to_world(self.leg_detection_people.people[i].position, header)
         #     self.new_leg_detection_people = True
 
-    def execute_bytetrack(self, event):
-        # If exist data in both modalities, check if leg track associated to track still existing
-        if self.new_leg_detection_people and self.new_yolo_people:
-            leg_detection_people = self.leg_detection_people
-            yolo_people = self.yolo_people
+    # def execute_bytetrack(self, event):
+    #     # If exist data in both modalities, check if leg track associated to track still existing
         
-            structured_data = self.read_visual_objects(yolo_people)
-            returned_tracks = self.tracker.update(np.array(structured_data["scores"]),
-                                                                    np.array(structured_data["boxes"]),
-                                                                    np.array(structured_data["clases"]),
-                                                                    np.array(structured_data["image"]),
-                                                                    np.array(structured_data["hash"]),
-                                                                    np.array(structured_data["pose"]),
-                                                                    np.array(structured_data["orientation"]))
-            
-            # Associate legs to visual pose
-            if len(returned_tracks) > 0:
-                self.leg_with_image_pose_association(returned_tracks, leg_detection_people.people)
-            
-            objects = self.to_object_interface(returned_tracks)
-            people_publisher.publish(objects)
-            self.new_yolo_people = False
-            self.new_leg_detection_people = False
+    #     # if self.new_leg_detection_people and self.new_yolo_people:
+    #     #     leg_detection_people = self.leg_detection_people
+    #     #     yolo_people = self.yolo_people
         
-        elif self.new_yolo_people: 
-            yolo_people = self.yolo_people
-            structured_data = self.read_visual_objects(yolo_people)
-            objects = self.to_object_interface(self.tracker.update(np.array(structured_data["scores"]),
-                                                                    np.array(structured_data["boxes"]),
-                                                                    np.array(structured_data["clases"]),
-                                                                    np.array(structured_data["image"]),
-                                                                    np.array(structured_data["hash"]),
-                                                                    np.array(structured_data["pose"]),
-                                                                    np.array(structured_data["orientation"])))
-            people_publisher.publish(objects)
-            self.new_yolo_people = False
+    #     #     structured_data = self.read_visual_objects(yolo_people)
+    #     #     returned_tracks = self.tracker.update(np.array(structured_data["scores"]),
+    #     #                                                             np.array(structured_data["boxes"]),
+    #     #                                                             np.array(structured_data["clases"]),
+    #     #                                                             np.array(structured_data["image"]),
+    #     #                                                             np.array(structured_data["hash"]),
+    #     #                                                             np.array(structured_data["pose"]),
+    #     #                                                             np.array(structured_data["orientation"]))
+            
+    #     #     # Associate legs to visual pose
+    #     #     if len(returned_tracks) > 0:
+    #     #         self.leg_with_image_pose_association(returned_tracks, leg_detection_people.people)
+            
+    #     #     objects = self.to_object_interface(returned_tracks)
+    #     #     people_publisher.publish(objects)
+    #     #     self.new_yolo_people = False
+    #     #     self.new_leg_detection_people = False
+        
+    #     if self.new_yolo_people: 
+    #         init = time.time()
+    #         yolo_people = self.yolo_people
+    #         structured_data = self.read_visual_objects(yolo_people)
+    #         objects = self.to_object_interface(self.tracker.update(np.array(structured_data["scores"]),
+    #                                                                 np.array(structured_data["boxes"]),
+    #                                                                 np.array(structured_data["clases"]),
+    #                                                                 np.array(structured_data["image"]),
+    #                                                                 np.array(structured_data["hash"]),
+    #                                                                 np.array(structured_data["pose"]),
+    #                                                                 np.array(structured_data["orientation"])))
+    #         self.people_publisher.publish(objects)
+    #         self.new_yolo_people = False
+    #         print("TIME EXPENDED:", time.time() - init)
 
-        elif self.new_leg_detection_people:
-            leg_detection_people = self.leg_detection_people
-            self.to_object_interface_legs(leg_detection_people.people)
-            self.new_leg_detection_people = False
+    #     # elif self.new_leg_detection_people:
+    #     #     leg_detection_people = self.leg_detection_people
+    #     #     self.to_object_interface_legs(leg_detection_people.people)
+    #     #     self.new_leg_detection_people = False
 
+        
+    #     # if self.new_yolo_people: 
+    #     #     print("ONLY YOLO")
+    #     #     yolo_people = self.yolo_people
+    #     #     structured_data = self.read_visual_objects(yolo_people)
+    #     #     objects = self.to_object_interface(self.tracker.update(np.array(structured_data["scores"]),
+    #     #                                                             np.array(structured_data["boxes"]),
+    #     #                                                             np.array(structured_data["clases"]),
+    #     #                                                             np.array(structured_data["image"]),
+    #     #                                                             np.array(structured_data["hash"]),
+    #     #                                                             np.array(structured_data["pose"]),
+    #     #                                                             np.array(structured_data["orientation"])))
+    #     #     people_publisher.publish(objects)
+    #     #     self.new_yolo_people = False
 
-        # if self.new_yolo_people: 
-        #     print("ONLY YOLO")
-        #     yolo_people = self.yolo_people
-        #     structured_data = self.read_visual_objects(yolo_people)
-        #     objects = self.to_object_interface(self.tracker.update(np.array(structured_data["scores"]),
-        #                                                             np.array(structured_data["boxes"]),
-        #                                                             np.array(structured_data["clases"]),
-        #                                                             np.array(structured_data["image"]),
-        #                                                             np.array(structured_data["hash"]),
-        #                                                             np.array(structured_data["pose"]),
-        #                                                             np.array(structured_data["orientation"])))
-        #     people_publisher.publish(objects)
-        #     self.new_yolo_people = False
+    def execute_bytetrack(self):        
+        init = time.time()
+        yolo_people = self.yolo_people
+        structured_data = self.read_visual_objects(yolo_people)
+        objects = self.to_object_interface(self.tracker.update(np.array(structured_data["scores"]),
+                                                                np.array(structured_data["boxes"]),
+                                                                np.array(structured_data["clases"]),
+                                                                np.array(structured_data["image"]),
+                                                                np.array(structured_data["hash"]),
+                                                                np.array(structured_data["pose"]),
+                                                                np.array(structured_data["orientation"])))
+        self.people_publisher.publish(objects)
 
     ###############################################
     ################ LEG FUNCTIONS ################
@@ -151,42 +186,48 @@ class bytetrack():
             "clases": [object.type for object in objects],
             "image": [object.image for object in objects],
             "hash": [self.get_color_histogram(object) for object in objects],
-            "pose": [[object.pose.position.x, object.pose.position.y] for object in objects],
-            "orientation" : [object.pose.orientation for object in objects]
+            "pose": [[object.pose.pose.position.x, object.pose.pose.position.y] for object in objects],
+            "orientation" : [object.pose.pose.orientation for object in objects]
         }  
     
     def to_object_interface(self, objects):
-        # Clean tracks that are the same person
-    
         returned_tracks = []
         for track in objects:
-            pose = Pose()
-            pose.position.x = round(track.mean[0], 2) if track.kalman_initiated else round(track._pose[0], 2)
-            pose.position.y = round(track.mean[1], 2) if track.kalman_initiated else round(track._pose[1], 2)
             track_object = Object(
                 id=int(track.track_id), score=track.score,
                 left=int(track.bbox[0]), top=int(track.bbox[1]),
                 right=int(track.bbox[2]),
-                bot=int(track.bbox[3]), pose = pose, type=track.clase
+                bot=int(track.bbox[3]), type=track.clase, image=track.image
             )
+            speed = Twist()
+            # print("ID", track.track_id) 
+            if track.kalman_initiated:
+                speed.linear.x = round(track.speed[0], 2)
+                speed.linear.y = round(track.speed[1], 2)
 
+                speed_module = math.sqrt(speed.linear.x ** 2 + speed.linear.y ** 2)
+                # print("SPEED MODULE", speed_module) 
+                if speed_module < self.stop_speed_threshold or np.isnan(speed.linear.x) or np.isnan(speed.linear.y):
+                    speed.linear.x = 0
+                    speed.linear.y = 0
+                
+                if speed_module >= self.stop_speed_threshold and self.followed_person_id != track_object.id and (track.state == TrackState.Lost or track.state == TrackState.Removed):
+                    continue
+                track_object.speed = speed
+
+            pose = Pose()
+            pose.position.x = round(track.mean[0], 2) if track.kalman_initiated and speed_module > self.stop_speed_threshold else round(track._pose[0], 2)
+            pose.position.y = round(track.mean[1], 2) if track.kalman_initiated and speed_module > self.stop_speed_threshold else round(track._pose[1], 2)
+            # print("POSE", pose.position.x, pose.position.y) 
             if math.isnan(pose.position.x) or math.isinf(pose.position.x) or math.isnan(pose.position.y) or math.isinf(pose.position.y): 
                 track_object.exist_position = False
             else:
                 track_object.exist_position = True
-            pose.orientation = track.orientation
-
-            speed = Twist()
-            if track.kalman_initiated:
-                speed.linear.x = round(track.mean[2]/ track.difference_between_updates, 2)
-                speed.linear.y = round(track.mean[3]/ track.difference_between_updates, 2)
-
-                if math.sqrt(speed.linear.x ** 2 + speed.linear.y ** 2) < 1 or np.isnan(speed.linear.x) or np.isnan(speed.linear.y):
-                    speed.linear.x = 0
-                    speed.linear.y = 0
-                print("SPEED PERSON", track.track_id, math.sqrt(speed.linear.x ** 2 + speed.linear.y ** 2))
-                track_object.speed = speed
+            pose.orientation = track.orientation   
+            pose_stamped = PoseStamped(pose = pose)
+            track_object.pose = pose_stamped
             returned_tracks.append(track_object)
+
         return ObjectsMSG(objectsmsg = returned_tracks)
 
     def to_object_interface_legs(self, leg_detections):
@@ -209,7 +250,7 @@ class bytetrack():
             
             returned_tracks.append(track_object)
         tracked_people = ObjectsMSG(objectsmsg = returned_tracks)
-        people_publisher.publish(tracked_people)
+        self.people_publisher.publish(tracked_people)
 
     ###############################################
     ########### IMAGE HASH FUNCTIONS ##############
@@ -222,10 +263,8 @@ class bytetrack():
     
     def get_color_histogram(self, object):
         color = np.frombuffer(object.image.data, dtype=np.uint8).reshape(object.image.height, object.image.width, 3)
-        # cv2.imshow("", color)
-        # cv2.waitKey(1)
+        color =cv2.cvtColor(color, cv2.COLOR_RGB2HSV)
         hist = cv2.calcHist([color], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-
         return self.normalize_histogram(hist)
 
     def normalize_histogram(self, hist):
@@ -251,21 +290,5 @@ class bytetrack():
         return matches, unmatched_a, unmatched_b
 
 if __name__ == '__main__':
-    rospy.init_node("people_tracker")
-    rospy.loginfo("People tracker node has been started")
-
     bytetracker = bytetrack()
 
-    # yolo_people_subscriber = rospy.Subscriber("/perceived_people", ObjectsMSG, bytetracker.set_new_yolo_people)
-    # leg_detector_people_subscriber = rospy.Subscriber("/people", People, bytetracker.set_new_leg_detection_people)
-
-    chosen_person_subscriber = rospy.Subscriber("/chosen_track", Int32, bytetracker.set_chosen_track)
-    yolo_people_subscriber = message_filters.Subscriber("/perceived_people", ObjectsMSG)
-    leg_detector_people_subscriber = message_filters.Subscriber("/people", People)
-    people_sync = message_filters.ApproximateTimeSynchronizer([yolo_people_subscriber, leg_detector_people_subscriber], queue_size=1, slop=0.1)
-    people_sync.registerCallback(bytetracker.set_new_people_data)
-    
-    people_publisher = rospy.Publisher("/tracked_people", ObjectsMSG, queue_size=5)
-
-    rospy.Timer(rospy.Duration(0.033), bytetracker.execute_bytetrack)
-    rospy.spin()

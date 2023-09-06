@@ -36,6 +36,7 @@ def _indices_to_matches(cost_matrix, indices, thresh):
 
 
 def linear_assignment(cost_matrix, thresh):
+    
     if cost_matrix.size == 0:
         return np.empty((0, 2), dtype=int), tuple(range(cost_matrix.shape[0])), tuple(range(cost_matrix.shape[1]))
     matches, unmatched_a, unmatched_b = [], [], []
@@ -46,6 +47,9 @@ def linear_assignment(cost_matrix, thresh):
     unmatched_a = np.where(x < 0)[0]
     unmatched_b = np.where(y < 0)[0]
     matches = np.asarray(matches)
+    # print("matches", matches)
+    # print("unmatched_a", unmatched_a)
+    # print("unmatched_b", unmatched_b)
     return matches, unmatched_a, unmatched_b
 
 def hash_distance_following(followed_track, btracks):
@@ -68,10 +72,10 @@ def hash_distance_following(followed_track, btracks):
     return cost_matrix
 
 def get_max_similarity_detection(distances_matrix, hash_memory):
-    print("distances_matrix", distances_matrix)
+    # print("distances_matrix", distances_matrix)
     
-    filtered_array, filtered_memory = remove_arrays_with_values_under_value(distances_matrix, hash_memory, 0.45)
-    print("filtered_array", filtered_array)
+    filtered_array, filtered_memory = remove_arrays_with_values_under_value(distances_matrix, hash_memory, 0.55)
+    # print("filtered_array", filtered_array)
     min_value_by_memory = np.argmin(filtered_array, axis=-1)
     
     # print("min_value_by_memory", min_value_by_memory)
@@ -80,9 +84,7 @@ def get_max_similarity_detection(distances_matrix, hash_memory):
     if len(counts) == 0:
         return -1, []
     else:
-        print("TIMES MATCHED:", counts[np.argmax(counts)])
-        print("PROPORTION RESPECT TOTAL MEMORY:", 0.9 * len(distances_matrix[0]))
-        if counts[np.argmax(counts)] > 0.9 * len(distances_matrix[0]):
+        if counts[np.argmax(counts)] > 0.05 * len(distances_matrix):
             return np.argmax(counts), filtered_memory
         else:
             return -1, []
@@ -142,8 +144,8 @@ def histograms(ahashs, bhashs):
     for i, hist1 in enumerate(histograms1):
         for j, hist2 in enumerate(histograms2):
             similarity = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-            similarity_matrix[i, j] = similarity
-    return 1 - similarity_matrix 
+            similarity_matrix[i, j] = np.clip(similarity, 0, 1)
+    return 1 - similarity_matrix
 
 def iou_distance(atracks, btracks):
     """
@@ -183,6 +185,41 @@ def ious(atlbrs, btlbrs):
     )
 
     return ious
+
+def pose_distance(atracks, btracks):
+    """
+    Compute cost based on world pose
+    :type atracks: list[STrack]
+    :type btracks: list[STrack]
+
+    :rtype cost_matrix np.ndarray
+    """
+    if (len(atracks)>0 and isinstance(atracks[0], np.ndarray)) or (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
+        atlbrs = atracks
+        btlbrs = btracks
+    else:
+        atlbrs = [track.get_pose for track in atracks]
+        btlbrs = [track.get_pose for track in btracks]
+    _poses = poses(atlbrs, btlbrs)
+    cost_matrix = _poses
+    # print("POSE COST MATRIX", cost_matrix)
+    cost_matrix = check_for_classes(atracks, btracks, cost_matrix)
+    return cost_matrix
+
+def poses(atlbrs, btlbrs):
+    poses = np.zeros((len(atlbrs), len(btlbrs)), dtype=np.float)
+    if poses.size == 0:
+        return poses
+    a_array = np.ascontiguousarray(atlbrs, dtype=np.float)
+    b_array = np.ascontiguousarray(btlbrs, dtype=np.float)
+    poses_matrix = np.linalg.norm(a_array[:, np.newaxis, :] - b_array[np.newaxis, :, :], axis=2)
+    # max_pose = np.max(poses_matrix)
+    # min_pose = np.min(poses_matrix)
+    # if max_pose != 0:
+    #     return poses_matrix * ((max_pose-min_pose)/max_pose)
+    # else:
+    #     return poses_matrix
+    return poses_matrix / 3.387
 
 def check_for_classes(atracks, btracks, cost_matrix):
     """

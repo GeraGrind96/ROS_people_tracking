@@ -8,6 +8,6 @@ float64 score
 float64 orientation
 float64 depth
 bool exist_position
-geometry_msgs/Pose pose
+geometry_msgs/PoseStamped pose
 geometry_msgs/Twist speed
 sensor_msgs/Image image

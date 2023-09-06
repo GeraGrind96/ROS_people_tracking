@@ -1,4 +1,0 @@
-<launch>
-  <node name="yolov8" pkg="yolov8" type="yolov8_seg_with_orientation.py" output="screen"/>
-  <node name="bytetrack" pkg="bytetrack" type="bytetrack.py" output="screen"/>
-</launch>
