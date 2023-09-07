@@ -7,6 +7,9 @@ from scipy.spatial.distance import cdist
 from cython_bbox import bbox_overlaps as bbox_ious
 import time
 
+min_proportion_of_matches = 0.1
+histogram_difference_threshold = 0.45
+
 def merge_matches(m1, m2, shape):
     O,P,Q = shape
     m1 = np.asarray(m1)
@@ -74,7 +77,7 @@ def hash_distance_following(followed_track, btracks):
 def get_max_similarity_detection(distances_matrix, hash_memory):
     # print("distances_matrix", distances_matrix)
     
-    filtered_array, filtered_memory = remove_arrays_with_values_under_value(distances_matrix, hash_memory, 0.55)
+    filtered_array, filtered_memory = remove_arrays_with_values_under_value(distances_matrix, hash_memory, histogram_difference_threshold)
     # print("filtered_array", filtered_array)
     min_value_by_memory = np.argmin(filtered_array, axis=-1)
     
@@ -84,7 +87,7 @@ def get_max_similarity_detection(distances_matrix, hash_memory):
     if len(counts) == 0:
         return -1, []
     else:
-        if counts[np.argmax(counts)] > 0.05 * len(distances_matrix):
+        if counts[np.argmax(counts)] > min_proportion_of_matches * len(distances_matrix):
             return np.argmax(counts), filtered_memory
         else:
             return -1, []
@@ -219,7 +222,7 @@ def poses(atlbrs, btlbrs):
     #     return poses_matrix * ((max_pose-min_pose)/max_pose)
     # else:
     #     return poses_matrix
-    return poses_matrix / 3.387
+    return poses_matrix / 5.73
 
 def check_for_classes(atracks, btracks, cost_matrix):
     """

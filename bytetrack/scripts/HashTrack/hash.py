@@ -219,12 +219,12 @@ class HashTracker(object):
 
         # Metrics weights
         self.k_hash = 0.3
-        self.k_iou = 0.7
-        self.k_pose = 0.0
+        self.k_iou = 0.0
+        self.k_pose = 0.7
 
-        self.k_hash_following = 0.3
-        self.k_iou_following = 0.0
-        self.k_pose_following = 0.7
+        self.k_hash_following = 0.35
+        self.k_iou_following = 0.1
+        self.k_pose_following = 0.55
 
         # For specific element mode
         self.chosen_track = -1
@@ -313,16 +313,13 @@ class HashTracker(object):
 
             for i in range(len(dists_pose[0])):
                 dists_hash[:, i] += dists_iou[0][i] + dists_pose[0][i]
-            # print(self.k_hash_following, self.k_iou_following)
             # For associating with detections score
             pos_match, filtered_memory = matching.get_max_similarity_detection(dists_hash, self.chosen_strack.hash_memory)
-            # self.tracked_stracks[0].refresh_memory(filtered_memory)
-            # print("NEW TRACK MEMORY SIZE:", len(self.tracked_stracks[0].hash_memory))
             if pos_match != -1:
                 self.followed_person_lost = False
-                self.k_hash_following = 0.5
-                self.k_iou_following = 0.0
-                self.k_pose_following = 0.5
+                self.k_hash_following = 0.35
+                self.k_iou_following = 0.1
+                self.k_pose_following = 0.55
                 self.chosen_strack.update(detections[pos_match], self.frame_id)
                 detections.remove(detections[pos_match])
 
@@ -358,7 +355,6 @@ class HashTracker(object):
         # print(dists_iou)
         # print(dists_pose)
         combinated_dists = dists_hash + dists_iou + dists_pose
-        # combinated_dists = dists_pose
         dists = matching.fuse_score(combinated_dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.match_thresh)
         for itracked, idet in matches:

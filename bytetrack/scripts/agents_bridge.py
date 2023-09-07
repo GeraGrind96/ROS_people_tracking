@@ -53,7 +53,8 @@ class WebotsAgents(object):
             agent_segment = TrackedSegment()
             agent_segment.type = self.Segment_Type
             agent_segment.pose.pose = agent.pose.pose
-            agent_segment.twist.twist = agent.speed                
+            agent_segment.twist.twist = agent.speed   
+            # print("ID:", agent.id, agent.speed )             
             tracked_agent = TrackedAgent()
             tracked_agent.type = AgentType.HUMAN
             tracked_agent.name = "human"+str(agent.id)

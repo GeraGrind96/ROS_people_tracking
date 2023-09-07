@@ -82,10 +82,11 @@ class PersonFollowing():
             robot_pose = PoseStamped()
             robot_pose.header = data.header
             robot_pose.header.stamp = rospy.Time(0)
-            robot_pose.header.frame_id = "odom_combined"
+            robot_pose.header.frame_id = "base_footprint"
 
-            robot_pose.pose = data.pose.pose
-            self.tf_listener.waitForTransform("map", "odom_combined", rospy.Time(), rospy.Duration(0.5))
+            # robot_pose.pose = data.pose.pose
+            robot_pose.pose.orientation.w = 1
+            self.tf_listener.waitForTransform("base_footprint", "map", rospy.Time(), rospy.Duration(0.5))
             transformed_point = self.tf_listener.transformPose("map", robot_pose)
             self.robot_pose = transformed_point.pose.position
         else:

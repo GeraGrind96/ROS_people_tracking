@@ -103,22 +103,22 @@ class yolov8():
             depth_subscriber = message_filters.Subscriber("/xtion/depth/image_raw", Image)
         
         ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber], 3)
-        ts.registerCallback(yolo.store_data)
+        ts.registerCallback(self.store_data)
         rospy.spin()
 
 ################# SUBSCRIBER CALLBACKS #################
 
     # def store_data(self, rgb, depth, odom):
     def store_data(self, rgb, depth):
-    if self.compressed_image:
-        self.color_image = self.cv_bridge.compressed_imgmsg_to_cv2(rgb, "rgb8")
-        self.depth_image = self.cv_bridge.compressed_imgmsg_to_cv2(depth)
-    else:
-        self.color_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
-        self.depth_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
-        
-    self.get_yolo_objects()
-        
+        if self.compressed_image:
+            self.color_image = self.cv_bridge.compressed_imgmsg_to_cv2(rgb, "rgb8")
+            self.depth_image = self.cv_bridge.compressed_imgmsg_to_cv2(depth)
+        else:
+            self.color_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
+            self.depth_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
+            
+        self.get_yolo_objects()
+            
 ################# DATA OBTAINING #################
 
     def get_people_data(self, img, depth):
@@ -209,7 +209,6 @@ class yolov8():
                                 # # if x_avg < 40 or x_avg > self.width - 40:
                                 # #     continue
                                 neck_point = np.array([x_avg_up, y_avg_up]).astype(int)
-                                print(neck_point)
                                 # back_point = np.array([x_avg_down, y_avg_down]).astype(int)
                                 # gender_pred, age_pred = self.get_pred_attributes(frame, person_bbox[0], person_bbox[1], person_bbox[2], person_bbox[3])
                                 person_pose_up = self.get_neck_distance(neck_point, depth_image, interesting_points_pose[0], interesting_points_pose[1])
@@ -522,10 +521,10 @@ def handler(signal_received, frame):
 ################# MAIN #################
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()compressed_image
+    parser = argparse.ArgumentParser()
     parser.add_argument('--real_robot', type=int)
-    args, unknown = parser.parse_known_args()
     parser.add_argument('--compressed_image', type=int)
+    args, unknown = parser.parse_known_args()
     real_robot = args.real_robot
     compressed_image = args.compressed_image
 
