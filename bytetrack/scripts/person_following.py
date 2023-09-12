@@ -5,9 +5,11 @@ from cohan_msgs.msg import TrackedAgents, TrackedAgent, TrackedSegment, TrackedS
 from yolov8_data.msg import ObjectsMSG
 from yolov8_data.srv import SetID
 from sensor_msgs.msg import *
-from geometry_msgs.msg import PoseStamped, Pose, Quaternion, PoseArray, PointStamped, Point
+from geometry_msgs.msg import *
 from nav_msgs.msg import *
 from std_msgs.msg import *
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from actionlib_msgs.msg import GoalID
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 import numpy as np
@@ -21,8 +23,8 @@ import argparse
 class PersonFollowing():
     def __init__(self, real_robot):
         self.color_image = []
-        self.new_image = False
         self.people = []
+        self.new_image = False
         self.new_people = False
         self.local_costmap = []
         self.timestamp = time.time()
@@ -32,6 +34,8 @@ class PersonFollowing():
         self.angle_threshold = math.pi / 2
 
         self.cv_bridge = CvBridge()
+        self.img_x = 960
+        self.img_y = 540
 
         self.generate_dataset = False
 
@@ -47,6 +51,12 @@ class PersonFollowing():
 
         self.tf_listener = tf.TransformListener()
 
+        self.person_disappeared = False
+        self.time_person_disappeared = 0
+        self.person_direction = 0
+
+
+
         ################# FOR CALCULATING ROBOT-FOLLOWED PERSON RELATIVE SPEED #################
         self.speed_memory = deque(maxlen=3)
         self.last_relative_distance = None
@@ -61,6 +71,7 @@ class PersonFollowing():
         rospy.Subscriber("tracked_people", ObjectsMSG, self.get_people_data)
         if self.real_robot:
             rospy.Subscriber("/base_odometry/odom", Odometry, self.get_robot_pose)
+            rospy.Subscriber("/rgb/compressed", CompressedImage, self.get_image)
         else:
             rospy.Subscriber("/odom", Odometry, self.get_robot_pose)
         rospy.Subscriber("/move_base/local_costmap/costmap", OccupancyGrid, self.get_local_costmap)
@@ -71,10 +82,19 @@ class PersonFollowing():
         self.person_pose_publisher = rospy.Publisher("/followed_person_pose", PoseStamped, queue_size = 1)
         self.behind_pose_publisher = rospy.Publisher("/point_behind_human", PoseArray, queue_size = 1)
         self.chosen_pose_publisher = rospy.Publisher("/chosen_track", Int32, queue_size = 1)
+        self.speed_publisher = rospy.Publisher("/base_controller/command", Twist, queue_size = 3)
+        self.cancel_pub = rospy.Publisher("/move_base/cancel", GoalID, queue_size=1)
+        self.head_angle_pub = rospy.Publisher("/head_traj_controller/command", JointTrajectory, queue_size=3)
+
+        self.set_head_initial_pose()
 
     def get_people_data(self, people):
         self.people = people.objectsmsg
         self.new_people = True
+
+    def get_image(self, data):
+        self.color_image = data
+        self.new_image = True
 
     def get_robot_pose(self, data):
         # print("ENTER")
@@ -88,7 +108,7 @@ class PersonFollowing():
             robot_pose.pose.orientation.w = 1
             self.tf_listener.waitForTransform("base_footprint", "map", rospy.Time(), rospy.Duration(0.5))
             transformed_point = self.tf_listener.transformPose("map", robot_pose)
-            self.robot_pose = transformed_point.pose.position
+            self.robot_pose = transformed_point.pose
         else:
             self.robot_pose = data.pose.pose.position
         
@@ -100,10 +120,12 @@ class PersonFollowing():
     def get_points_behind_person(self, person_pose, person_orientation, robot_pose, points_radius):       
         act_local_grid = self.local_costmap 
         person_robot_vector = [robot_pose.x - person_pose.x, robot_pose.y - person_pose.y]
+       
         opposite_angle = math.atan2(person_robot_vector[1], person_robot_vector[0])
         self.max_angle_to_back_point = math.pi / 4
         points_behind_person, angles_to_person = self.points_arc(person_pose, points_radius, opposite_angle, self.max_angle_to_back_point, self.number_of_possible_points, act_local_grid, True)
         return points_behind_person, angles_to_person 
+
 
     # Return possible poses points and angles to person
     def points_arc(self, person_pose, radio, central_angle, angular_range, point_number, local_grid, orientation_to_person=False):
@@ -197,10 +219,53 @@ class PersonFollowing():
             if self.local_costmap:
                 for person in self.people:
                     if person.id == self.person_id:
-                        speed = self.calculate_speed_between_robot_and_person(person.pose.pose.position, robot_pose)
+                        person.pose.header.frame_id = "map"
+                        person_pose_transformed = self.tf_listener.transformPose("base_footprint", person.pose) 
+                        self.publish_head_orientation(person_pose_transformed)
+                        self.person_disappeared = False
+                        speed = self.calculate_speed_between_robot_and_person(person.pose.pose.position, robot_pose.position)
                         point_radius = self.point_distance_by_speed(speed)
-                        self.publish_goal(person, robot_pose, point_radius)
-                        break
+                        self.publish_goal(person, robot_pose.position, point_radius)
+                        return
+                # If the person disappeared
+                if self.person_disappeared:
+                    speed = Twist()
+                    if (time.time() - self.time_person_disappeared) < 18:
+                        speed.angular.z = self.person_direction * 0.8
+                    self.speed_publisher.publish(speed)
+
+                else:
+                    cancel_msg = GoalID()
+                    self.cancel_pub.publish(cancel_msg)
+                    # target_pose_stamped = PoseStamped()
+                    # target_pose_stamped.header.stamp = rospy.Time.now()
+                    # target_pose_stamped.header.frame_id = "map" 
+                    # target_pose_stamped.pose = robot_pose
+                    # self.pose_publisher.publish(target_pose_stamped)
+                    self.time_person_disappeared = time.time()
+                    self.person_disappeared = True
+                
+    
+    def publish_head_orientation(self, person_pose):
+        person_robot_angle_x = math.atan2(person_pose.pose.position.y, person_pose.pose.position.x)
+        goal = JointTrajectory()
+        goal.joint_names = ["head_pan_joint", "head_tilt_joint"]
+        goal.points = []
+        point = JointTrajectoryPoint()
+        point.positions = [np.clip(person_robot_angle_x, -math.pi / 3, math.pi / 3), 0.115233041300273]
+        point.velocities = [0.0, 0.0]
+        goal.points.append(point)
+        self.head_angle_pub.publish(goal)
+
+    def set_head_initial_pose(self):
+        goal = JointTrajectory()
+        goal.joint_names = ["head_pan_joint", "head_tilt_joint"]
+        goal.points = []
+        point = JointTrajectoryPoint()
+        point.positions = [0, 0.115233041300273]
+        point.velocities = [0.0, 0.0]
+        goal.points.append(point)
+        self.head_angle_pub.publish(goal)
 
     def publish_goal(self, person, robot_pose, points_radius):
         quaternion = [person.pose.pose.orientation.x, person.pose.pose.orientation.y, person.pose.pose.orientation.z, person.pose.pose.orientation.w]
@@ -249,13 +314,22 @@ class PersonFollowing():
     ############ Plot people information ############
 
     def set_people_in_image(self, event):
-        act_image = np.zeros((540, 960, 3), dtype=np.uint8)
-        if self.new_people:
+        # act_image = np.zeros((self.img_y, self.img_x, 3), dtype=np.uint8)
+        if self.new_image and self.new_people:
+            act_image = self.color_image
+            act_image = self.cv_bridge.compressed_imgmsg_to_cv2(act_image, "rgb8")
             act_people = self.people
             for person in act_people:
                 # self.insert_image_to_dataset(act_image[int(person.top):int(person.bot), int(person.left):int(person.right)])
 
                 if person.id == self.person_id:
+                    person_x_center = int(person.left) + (int(person.right) - int(person.left)) / 2
+                    if person_x_center < self.img_x / 3:
+                        self.person_direction = 1
+                    elif person_x_center > (self.img_x * 2 / 3):
+                        self.person_direction = -1
+                    else:
+                        self.person_direction = 0
                     cv2.rectangle(act_image, (int(person.left), int(person.top)), (int(person.right), int(person.bot)), (0, 0, 255), 2)
                 else:
                     cv2.rectangle(act_image, (int(person.left), int(person.top)), (int(person.right), int(person.bot)), (255, 0, 0), 2)
@@ -265,6 +339,7 @@ class PersonFollowing():
             cv2.waitKey(1)
             cv2.setMouseCallback("Robot Camera", self.select_person)
             self.new_people = False
+            self.new_image = False
 
     def insert_image_to_dataset(self, image):
         if self.generate_dataset:
@@ -290,6 +365,16 @@ class PersonFollowing():
             self.person_id = -1
             self.set_id_service(self.person_id)
             self.generate_dataset = False
+            start_pose = PoseStamped()
+            start_pose.header.stamp = rospy.Time.now()
+            start_pose.header.frame_id = "map" 
+            pose = Pose()
+            pose.position.x = 6
+            pose.position.y = 16
+            pose.position.z = 0
+            pose.orientation = Quaternion(x=0, y=0, z=1, w=0)
+            start_pose.pose = pose
+            self.pose_publisher.publish(start_pose)
 
 if __name__ == '__main__':    
 
@@ -310,6 +395,6 @@ if __name__ == '__main__':
 
     person_following = PersonFollowing(real_robot)
 
-    rospy.Timer(rospy.Duration(0.033), person_following.set_people_in_image)
-    rospy.Timer(rospy.Duration(0.1), person_following.publish_person_pose)
+    rospy.Timer(rospy.Duration(0.01), person_following.set_people_in_image)
+    rospy.Timer(rospy.Duration(0.05), person_following.publish_person_pose)
     rospy.spin()

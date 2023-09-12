@@ -104,6 +104,7 @@ class yolov8():
         
         ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber], 3)
         ts.registerCallback(self.store_data)
+        # rospy.Timer(rospy.Duration(0.04), self.display_images)
         rospy.spin()
 
 ################# SUBSCRIBER CALLBACKS #################
@@ -116,8 +117,12 @@ class yolov8():
         else:
             self.color_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
             self.depth_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
-            
+
         self.get_yolo_objects()
+
+    # def display_images(self, event):
+    #     cv2.imshow("RGB", self.color_image)
+    #     cv2.waitKey(1)
             
 ################# DATA OBTAINING #################
 
@@ -160,12 +165,12 @@ class yolov8():
             orientation = tf.transformations.quaternion_from_euler(0, 0, math.radians(orientations[matches[i][1]][0]) - math.pi)    
             pose_stamped = PoseStamped()
             pose_stamped.header.stamp = rospy.Time(0)
-            pose_stamped.header.frame_id = "base_footprint" 
+            pose_stamped.header.frame_id = "head_mount_l515_link" 
             pose = Pose()
             pose.orientation = Quaternion(x=orientation[0], y=orientation[1], z=orientation[2], w=orientation[3])
             pose.position.x = pose_respect_to_camera[0]
             pose.position.y = -pose_respect_to_camera[1]
-            pose.position.z = 0.0
+            pose.position.z = pose_respect_to_camera[2]
             pose_stamped.pose = pose
             transformed_pose = self.tf_listener.transformPose("map", pose_stamped)
             people_poses.append(transformed_pose)
@@ -188,7 +193,8 @@ class yolov8():
                         if person_confidence > 0.8:
                             person_bbox = boxes[i].xyxy.cpu().numpy().astype(int)[0] 
                             if len(keypoints[i]) > 0: 
-                                interesting_points_color = [keypoints[i][5], keypoints[i][6], keypoints[i][7], keypoints[i][8], keypoints[i][11], keypoints[i][12], keypoints[i][13], keypoints[i][14]]
+                                # interesting_points_color = [keypoints[i][5], keypoints[i][6], keypoints[i][7], keypoints[i][8], keypoints[i][11], keypoints[i][12], keypoints[i][13], keypoints[i][14]]
+                                interesting_points_color = [keypoints[i][5], keypoints[i][6], keypoints[i][7], keypoints[i][8], keypoints[i][11], keypoints[i][12]]
                                 interesting_points_pose = [keypoints[i][5], keypoints[i][6], keypoints[i][11], keypoints[i][12]]
                                 # valid_pose = True
                                 # for j, keypoint in enumerate(keypoints[i]):
@@ -213,7 +219,7 @@ class yolov8():
                                 # gender_pred, age_pred = self.get_pred_attributes(frame, person_bbox[0], person_bbox[1], person_bbox[2], person_bbox[3])
                                 person_pose_up = self.get_neck_distance(neck_point, depth_image, interesting_points_pose[0], interesting_points_pose[1])
                                 # person_pose_down = self.get_neck_distance(back_point, depth_image)
-                                # print("PERSON POSE UP:", person_pose_up)
+                                # print("PERSON POSE:", person_pose_up)
                                 # print("PERSON POSE DOWN:", person_pose_down)
                                 if np.isinf(person_pose_up[0]) or person_pose_up[0] == 0 or person_pose_up[0] > 5:
                                     # print("REMOVED FOR NON VALID POSE 2")
@@ -221,7 +227,8 @@ class yolov8():
                                 pose_poses.append(person_pose_up)
                                 pose_bboxes.append(person_bbox)
                                 pose_confidences.append(person_confidence)   
-                                color_lines = [[interesting_points_color[0], interesting_points_color[1]], [interesting_points_color[3], interesting_points_color[1]], [interesting_points_color[0], interesting_points_color[2]], [interesting_points_color[4], interesting_points_color[6]], [interesting_points_color[5], interesting_points_color[7]]]
+                                # color_lines = [[interesting_points_color[0], interesting_points_color[1]], [interesting_points_color[3], interesting_points_color[1]], [interesting_points_color[0], interesting_points_color[2]], [interesting_points_color[4], interesting_points_color[6]], [interesting_points_color[5], interesting_points_color[7]]]
+                                color_lines = [[interesting_points_color[0], interesting_points_color[1]], [interesting_points_color[3], interesting_points_color[1]], [interesting_points_color[0], interesting_points_color[2]], [interesting_points_color[4], interesting_points_color[0]], [interesting_points_color[5], interesting_points_color[1]]]
                                 person_mask = self.get_most_common_color(color_lines, color_image)
                                 # cv2.imshow("MASK", person_mask)
                                 pose_masks.append(person_mask)
@@ -232,24 +239,56 @@ class yolov8():
         # cv2.waitKey(1)
         return pose_bboxes, pose_confidences, pose_poses, pose_masks
 
+    # def get_neck_distance(self, neck_point, depth_image, point_a, point_b):
+    #     depth_mean = 0
+    #     counter = 0  
+    #     last_depth_value = None
+    #     points = np.linspace(point_a, point_b, num=12, dtype=np.int32)
+    #     for point in points:
+    #         depth_value = int(depth_image[point[1], point[0]])
+    #         print("DEPTH:", point[0], point[1], depth_value)
+    #         if not np.isinf(depth_value) and depth_value != 0 and depth_value < 5000: 
+    #             if last_depth_value is None:
+    #                 last_depth_value = depth_value
+    #                 depth_mean += depth_value
+    #                 counter += 1
+    #             elif abs(depth_value - last_depth_value) > 100:
+    #                 print("DIFF", abs(depth_value - last_depth_value))
+    #                 if depth_value >= last_depth_value:
+    #                     counter, depth_mean, last_depth_value = 1, depth_value, depth_value
+    #                 else:
+    #                     continue
+    #             else:
+    #                 depth_mean += depth_value
+    #                 counter += 1
+
+    #     if counter > 0:            
+    #         neck_point_3d = self.depth_point_to_xyz(neck_point, (depth_mean / (counter * 1000) ))
+    #         return neck_point_3d
+    #     else:
+    #         return [np.inf, np.inf, np.inf]
+
     def get_neck_distance(self, neck_point, depth_image, point_a, point_b):
         depth_mean = 0
-        max_dist = 7
+        max_dist_x = 3
+        max_dist_y = 1
         counter = 0  
         range_vector_x = np.array([point_a[0], point_b[0]])
         range_vector_y = np.array([point_a[1], point_b[1]])
         max_value_x, min_value_x = np.max(range_vector_x), np.min(range_vector_x)
         max_value_y, min_value_y = np.max(range_vector_y), np.min(range_vector_y)
         last_depth_value = None
-        for x in range(np.clip(neck_point[0] - max_dist, min_value_x, max_value_x), np.clip(neck_point[0] + max_dist + 1, min_value_x, max_value_x)):
-            for y in range(np.clip(neck_point[1] - max_dist, min_value_y, max_value_y), np.clip(neck_point[1] + max_dist + 1, min_value_y, max_value_y)):
+        for x in range(np.clip(neck_point[0] - max_dist_x, min_value_x, max_value_x), np.clip(neck_point[0] + max_dist_x + 1, min_value_x, max_value_x)):
+            for y in range(np.clip(neck_point[1] - max_dist_y, min_value_y, max_value_y), np.clip(neck_point[1] + max_dist_y + 1, min_value_y, max_value_y)):
                 depth_value = int(depth_image[y, x])
-                if not np.isinf(depth_value) and depth_value != 0: 
+                # print("DEPTH:", x, y, depth_value)
+                if not np.isinf(depth_value) and depth_value != 0 and depth_value < 5000: 
                     if last_depth_value is None:
                         last_depth_value = depth_value
                         depth_mean += depth_value
                         counter += 1
                     elif abs(depth_value - last_depth_value) > 100:
+                        # print("DIFF", abs(depth_value - last_depth_value))
                         if depth_value >= last_depth_value:
                             counter, depth_mean, last_depth_value = 1, depth_value, depth_value
                         else:
@@ -426,13 +465,14 @@ class yolov8():
 ################# TO WORLD TRANSFORMATIONS #################
 
     def transform_pose_to_world_reference(self, person_pose, robot_trans_matrix):
-        person_world_position = np.dot(robot_trans_matrix, np.array([person_pose[0], -person_pose[1], 0, 1]))
+        # person_world_position = np.dot(robot_trans_matrix, np.array([person_pose[0], -person_pose[1], 0, 1]))
         person_pose = PoseStamped()
+        person_pose.header.frame_id = "head_pan_link"
         person_pose.pose.position.x = person_pose[0]
         person_pose.pose.position.y = -person_pose[1]
         person_pose.pose.position.z = 0
-        transformed_point = self.tf_listener.transformPoint("map", person_pose)
-        return [round(person_world_position[0], 3), round(person_world_position[1], 3)]
+        # transformed_point = self.tf_listener.transformPose("map", person_pose)
+        return [round(transformed_point.pose.position.x, 3), round(transformed_point.pose.position.y, 3)]
     
 ################# IMAGE POINTS TO DEPTH #################
 

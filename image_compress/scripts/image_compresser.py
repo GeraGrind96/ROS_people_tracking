@@ -8,8 +8,8 @@ import numpy as np
 import time
 class ImageCompressor():
     def __init__(self):
-        self.color_publisher = rospy.Publisher("/rgb/compressed", CompressedImage, queue_size=5)
-        self.depth_publisher = rospy.Publisher("/depth/compressed", CompressedImage, queue_size=5)
+        self.color_publisher = rospy.Publisher("/rgb/compressed", CompressedImage, queue_size=3)
+        self.depth_publisher = rospy.Publisher("/depth/compressed", CompressedImage, queue_size=3)
 
         self.color = []
         self.depth = []
@@ -20,7 +20,7 @@ class ImageCompressor():
         rgb_subscriber = message_filters.Subscriber("/xtion/rgb/image_raw", Image)
         depth_subscriber = message_filters.Subscriber("/xtion/depth/image_raw", Image)
         
-        ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber], 1)
+        ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber], 3)
         ts.registerCallback(self.republish_compressed_images)
 
     def republish_compressed_images(self, rgb, depth):

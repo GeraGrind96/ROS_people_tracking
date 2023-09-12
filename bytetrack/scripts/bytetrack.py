@@ -30,14 +30,14 @@ class bytetrack():
         # self.new_leg_detection_people = False
         self.followed_person_id = -1
 
-        self.stop_speed_threshold = 0.1
+        self.stop_speed_threshold = 0.25
 
         rospy.init_node("people_tracker")
         rospy.loginfo("People tracker node has been started")
 
         self.people_publisher = rospy.Publisher("/tracked_people", ObjectsMSG, queue_size=5)
         yolo_people_subscriber = rospy.Subscriber("/perceived_people", ObjectsMSG, self.set_new_yolo_people)
-
+        self.tracks_publisher = rospy.Publisher("/tracks", PoseArray, queue_size = 3)
         # For also using leg detection
         # leg_detector_people_subscriber = rospy.Subscriber("/people", People, bytetracker.set_new_leg_detection_people)
         # yolo_people_subscriber = message_filters.Subscriber("/perceived_people", ObjectsMSG)
@@ -186,12 +186,14 @@ class bytetrack():
             "clases": [object.type for object in objects],
             "image": [object.image for object in objects],
             "hash": [self.get_color_histogram(object) for object in objects],
-            "pose": [[object.pose.pose.position.x, object.pose.pose.position.y] for object in objects],
+            "pose": [[object.pose.pose.position.x, object.pose.pose.position.y, object.pose.pose.position.z] for object in objects],
             "orientation" : [object.pose.pose.orientation for object in objects]
         }  
     
     def to_object_interface(self, objects):
         returned_tracks = []
+        tracked_people = PoseArray()
+        tracked_people.header.frame_id = "map"
         for track in objects:
             track_object = Object(
                 id=int(track.track_id), score=track.score,
@@ -218,16 +220,18 @@ class bytetrack():
             pose = Pose()
             pose.position.x = round(track.mean[0], 2) if track.kalman_initiated and speed_module > self.stop_speed_threshold else round(track._pose[0], 2)
             pose.position.y = round(track.mean[1], 2) if track.kalman_initiated and speed_module > self.stop_speed_threshold else round(track._pose[1], 2)
+            pose.position.z = round(track.pose_z, 2)
             # print("POSE", pose.position.x, pose.position.y) 
             if math.isnan(pose.position.x) or math.isinf(pose.position.x) or math.isnan(pose.position.y) or math.isinf(pose.position.y): 
                 track_object.exist_position = False
             else:
                 track_object.exist_position = True
             pose.orientation = track.orientation   
+            tracked_people.poses.append(pose)
             pose_stamped = PoseStamped(pose = pose)
             track_object.pose = pose_stamped
             returned_tracks.append(track_object)
-
+        self.tracks_publisher.publish(tracked_people)
         return ObjectsMSG(objectsmsg = returned_tracks)
 
     def to_object_interface_legs(self, leg_detections):

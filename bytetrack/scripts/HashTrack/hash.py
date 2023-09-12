@@ -9,10 +9,13 @@ import cv2
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
+    last_multipredict_execution = time.time()
+    last_multipredict_diff = 0
     def __init__(self, bbox, pose, score, clase, image, hash, orientation, kalman_enabled=True):
 
         # wait activate
-        self._pose = np.asarray(pose, dtype=np.float)
+        self._pose = np.asarray([pose[0], pose[1]], dtype=np.float)
+        self.pose_z = pose[2]
 
         self.last_pose = [math.inf, math.inf]
         self.speed_pose = [0, 0]
@@ -44,6 +47,8 @@ class STrack(BaseTrack):
 
         self.orientation = orientation
 
+
+
     def predict(self):
         mean_state = self.mean.copy()
         self.mean, self.covariance = self.kalman_filter.predict(mean_state, self.covariance)
@@ -55,11 +60,20 @@ class STrack(BaseTrack):
             multi_covariance = np.asarray([st.covariance for st in stracks if st.kalman_initiated])
 
             if len(multi_covariance) > 0 and len(multi_mean) > 0:
-                for i, st in enumerate(stracks):
                     # if st.state != TrackState.Tracked:
                     #     multi_mean[i][3] = 0 
-                    multi_mean, multi_covariance = STrack.shared_kalman.multi_predict(multi_mean, multi_covariance)
+                multi_mean, multi_covariance = STrack.shared_kalman.multi_predict(multi_mean, multi_covariance)
+                STrack.last_multipredict_diff = time.time() - STrack.last_multipredict_execution
+                STrack.last_multipredict_execution = time.time()
                 for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
+                    speed_vector = np.array([mean[2], mean[3]])
+                    speed_module = np.linalg.norm(speed_vector) / STrack.last_multipredict_diff
+                    # print("SPEED MODULE", speed_module)
+                    if speed_module > 2:
+                        # print("VALOR DE MODULO SUPERADO")
+                        scale_factor = 2 / speed_module
+                        new_speed_vector = speed_vector * scale_factor
+                        mean[2], mean[3] = new_speed_vector[0], new_speed_vector[1]
                     stracks[i].mean = mean
                     stracks[i].covariance = cov
 
@@ -97,6 +111,7 @@ class STrack(BaseTrack):
                     self.last_kalman_update = time.time()
         self.last_pose = self._pose
         self._pose = new_track._pose
+        self.pose_z = new_track.pose_z
         self.last_pose_update = time.time()
         self.tracklet_len = 0
         self.state = TrackState.Tracked
@@ -153,22 +168,22 @@ class STrack(BaseTrack):
                         self.mean, self.covariance, new_track._pose)
                     
 
-                if not self.kalman_initiated:
-                    self.mean, self.covariance = self.kalman_filter.initiate(new_track._pose)
-                    self.last_kalman_update = time.time()
-                    self.kalman_initiated = True
-                else:
-                    self.last_pose = [self.mean[0], self.mean[1]]
-                    pose_diff = math.sqrt((self.mean[0] - new_track._pose[0]) ** 2 + (self.mean[1] - new_track._pose[1]) ** 2)
-                    if pose_diff < 0.25:
-                        self.difference_between_updates = time.time() - self.last_kalman_update
-                        if (time.time() - self.last_kalman_update) > self.store_speed_period:
-                            speed_vector = np.array([self.mean[2], self.mean[3]]) / self.difference_between_updates
-                            self.speed_memory.append(speed_vector)
-                            self.speed = np.mean(self.speed_memory, axis=0)
-                            self.last_kalman_update = time.time()
-                        self.mean, self.covariance = self.kalman_filter.update(
-                            self.mean, self.covariance, new_track._pose)
+                # if not self.kalman_initiated:
+                #     self.mean, self.covariance = self.kalman_filter.initiate(new_track._pose)
+                #     self.last_kalman_update = time.time()
+                #     self.kalman_initiated = True
+                # else:
+                #     self.last_pose = [self.mean[0], self.mean[1]]
+                #     # pose_diff = math.sqrt((self.mean[0] - new_track._pose[0]) ** 2 + (self.mean[1] - new_track._pose[1]) ** 2)
+                #     # if pose_diff < 0.25:
+                #         self.difference_between_updates = time.time() - self.last_kalman_update
+                #         if (time.time() - self.last_kalman_update) > self.store_speed_period:
+                #             speed_vector = np.array([self.mean[2], self.mean[3]]) / self.difference_between_updates
+                #             self.speed_memory.append(speed_vector)
+                #             self.speed = np.mean(self.speed_memory, axis=0)
+                #             self.last_kalman_update = time.time()
+                #         self.mean, self.covariance = self.kalman_filter.update(
+                #             self.mean, self.covariance, new_track._pose)
         
 
         self._pose = new_track._pose
@@ -218,17 +233,21 @@ class HashTracker(object):
         self.kalman_filter = KalmanFilter()
 
         # Metrics weights
-        self.k_hash = 0.3
-        self.k_iou = 0.0
-        self.k_pose = 0.7
+        # self.k_hash = 0.3
+        # self.k_iou = 0.0
+        # self.k_pose = 0.7
+        self.k_hash = 0.05
+        self.k_iou = 0.4
+        self.k_pose = 0.55
 
-        self.k_hash_following = 0.35
-        self.k_iou_following = 0.1
-        self.k_pose_following = 0.55
+
+        self.k_hash_following = 0.2
+        self.k_iou_following = 0.45
+        self.k_pose_following = 0.35
 
         # For specific element mode
         self.chosen_track = -1
-        self.time_without_seeing_followed_limit = 4
+        self.time_without_seeing_followed_limit = 3
         self.time_person_is_lost = 0
         self.followed_person_lost = False
 
@@ -317,9 +336,9 @@ class HashTracker(object):
             pos_match, filtered_memory = matching.get_max_similarity_detection(dists_hash, self.chosen_strack.hash_memory)
             if pos_match != -1:
                 self.followed_person_lost = False
-                self.k_hash_following = 0.35
-                self.k_iou_following = 0.1
-                self.k_pose_following = 0.55
+                self.k_hash_following = 0.2
+                self.k_iou_following = 0.45
+                self.k_pose_following = 0.35
                 self.chosen_strack.update(detections[pos_match], self.frame_id)
                 detections.remove(detections[pos_match])
 
@@ -328,14 +347,16 @@ class HashTracker(object):
                 if not self.followed_person_lost:
                     self.time_person_is_lost = time.time()
                     self.followed_person_lost = True
+                    
                 else:
                     if time.time() - self.time_person_is_lost > self.time_without_seeing_followed_limit:
                         followed_person_found = False
+                        self.chosen_strack.kalman_initiated = False
 
                 # self.chosen_strack.kalman_initiated = False
-                self.k_hash_following = 1.0
+                self.k_hash_following = 0.9
                 self.k_iou_following = 0.0
-                self.k_pose_following = 0.0
+                self.k_pose_following = 0.1
         else:
             if not self.followed_person_lost:
                 # print("PERSON LOST FOR FIRST TIME")
@@ -345,6 +366,7 @@ class HashTracker(object):
                 if time.time() - self.time_person_is_lost > self.time_without_seeing_followed_limit:
                     # print("PERSON DEFINETLY LOST")
                     followed_person_found = False
+                    self.chosen_strack.kalman_initiated = False
 
         strack_pool.remove(self.chosen_strack)
         dists_hash = self.k_hash * matching.hash_distance(strack_pool, detections)
@@ -440,7 +462,9 @@ class HashTracker(object):
         self.lost_stracks.extend(lost_stracks)
         self.lost_stracks = self.sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
-        _, self.lost_stracks = self.remove_duplicate_stracks([self.chosen_strack], self.lost_stracks)
+        print("REMOVING DUPLICATED")
+        _, self.lost_stracks = self.remove_duplicate_stracks([self.chosen_strack], self.lost_stracks, True)
+        print("LOST:", self.lost_stracks)
         self.tracked_stracks, self.lost_stracks = self.remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         output_stracks = [track for track in self.tracked_stracks]
         output_stracks.extend(self.lost_stracks)
@@ -615,11 +639,24 @@ class HashTracker(object):
                 del stracks[tid]
         return list(stracks.values())
 
-    def remove_duplicate_stracks(self, stracksa, stracksb):
+    def remove_duplicate_stracks(self, stracksa, stracksb, following=False):
         pdist_hash = self.k_hash * matching.hash_distance(stracksa, stracksb)
         pdist_iou = self.k_iou * matching.iou_distance(stracksa, stracksb)
-        pdist_pose = self.k_pose * matching.pose_distance(stracksa, stracksb)
-        pairs = np.where((pdist_iou < self.k_iou * 0.15) & (pdist_hash < self.k_hash * 0.4) & (pdist_pose < self.k_pose * 0.3))
+        if not following:
+            pdist_pose = self.k_pose * matching.pose_distance(stracksa, stracksb)
+            pdist_hash = self.k_hash * matching.hash_distance(stracksa, stracksb)
+            pdist_iou = self.k_iou * matching.iou_distance(stracksa, stracksb)
+            # pairs = np.where((pdist_iou < self.k_iou * 0.15) & (pdist_pose < self.k_pose * 0.3))
+            pairs = np.where((pdist_iou < self.k_iou * 0.15) & (pdist_hash < self.k_hash * 0.4) & (pdist_pose < self.k_pose * 0.3))
+        else:
+            pdist_pose = self.k_pose_following * matching.pose_distance(stracksa, stracksb)
+            pdist_hash = self.k_hash_following * matching.hash_distance(stracksa, stracksb)
+            pdist_iou = self.k_iou_following * matching.iou_distance(stracksa, stracksb)
+            pairs = np.where((pdist_iou < self.k_iou_following * 0.15) & (pdist_hash < self.k_hash_following * 0.4) & (pdist_pose < self.k_pose_following * 0.3))
+
+            # pairs = np.where((pdist_iou < self.k_iou_following * 0.15) & (pdist_hash < self.k_hash_following * 0.4))
+        print(pdist_hash, self.k_hash * 0.4)
+        print(pdist_iou, self.k_iou * 0.15)
         dupa, dupb = list(), list()
         for p, q in zip(*pairs):
             timep = stracksa[p].frame_id - stracksa[p].start_frame
