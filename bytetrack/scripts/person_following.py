@@ -18,13 +18,17 @@ import tf
 import os
 import time
 from collections import deque
+import message_filters
+
 import argparse
 
 class PersonFollowing():
     def __init__(self, real_robot):
         self.color_image = []
         self.people = []
-        self.new_image = False
+        self.color = []
+        self.depth = []
+        self.new_images = False
         self.new_people = False
         self.local_costmap = []
         self.timestamp = time.time()
@@ -71,9 +75,16 @@ class PersonFollowing():
         rospy.Subscriber("tracked_people", ObjectsMSG, self.get_people_data)
         if self.real_robot:
             rospy.Subscriber("/base_odometry/odom", Odometry, self.get_robot_pose)
-            rospy.Subscriber("/rgb/compressed", CompressedImage, self.get_image)
+            rgb_subscriber = message_filters.Subscriber("/rgb/compressed", CompressedImage)
+            depth_subscriber = message_filters.Subscriber("/depth/compressed", CompressedImage)
+            ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber], 3)
+            ts.registerCallback(self.store_data)
         else:
             rospy.Subscriber("/odom", Odometry, self.get_robot_pose)
+            rgb_subscriber = message_filters.Subscriber("/xtion/rgb/image_raw", Image)
+            depth_subscriber = message_filters.Subscriber("/xtion/depth/image_raw", Image)
+            ts = message_filters.TimeSynchronizer([rgb_subscriber, depth_subscriber], 3)
+            ts.registerCallback(self.store_data)
         rospy.Subscriber("/move_base/local_costmap/costmap", OccupancyGrid, self.get_local_costmap)
 
         self.set_id_service = rospy.ServiceProxy('set_id', SetID)
@@ -82,7 +93,7 @@ class PersonFollowing():
         self.person_pose_publisher = rospy.Publisher("/followed_person_pose", PoseStamped, queue_size = 1)
         self.behind_pose_publisher = rospy.Publisher("/point_behind_human", PoseArray, queue_size = 1)
         self.chosen_pose_publisher = rospy.Publisher("/chosen_track", Int32, queue_size = 1)
-        self.speed_publisher = rospy.Publisher("/base_controller/command", Twist, queue_size = 3)
+        self.speed_publisher = rospy.Publisher("/base_controller/command", Twist, queue_size = 10)
         self.cancel_pub = rospy.Publisher("/move_base/cancel", GoalID, queue_size=1)
         self.head_angle_pub = rospy.Publisher("/head_traj_controller/command", JointTrajectory, queue_size=3)
 
@@ -92,9 +103,28 @@ class PersonFollowing():
         self.people = people.objectsmsg
         self.new_people = True
 
-    def get_image(self, data):
-        self.color_image = data
-        self.new_image = True
+    def store_data(self, rgb, depth):
+        if real_robot:
+            self.color = self.cv_bridge.compressed_imgmsg_to_cv2(rgb)
+            self.depth = self.cv_bridge.compressed_imgmsg_to_cv2(depth)
+        else:
+            self.color = self.cv_bridge.imgmsg_to_cv2(rgb)
+            self.depth = self.cv_bridge.imgmsg_to_cv2(depth)
+        self.new_images = True
+
+    # def get_image(self, data):
+    #     self.color_image = data
+    #     act_image = self.cv_bridge.compressed_imgmsg_to_cv2(data)
+    #     cv2.imshow("RGB", act_image)
+    #     cv2.waitKey(1)
+    #     # self.new_image = True
+
+    # def get_depth(self, data):
+    #     self.color_image = data
+    #     act_image = self.cv_bridge.compressed_imgmsg_to_cv2(data)
+    #     cv2.imshow("depth", act_image)
+    #     cv2.waitKey(1)
+        # self.new_image = True
 
     def get_robot_pose(self, data):
         # print("ENTER")
@@ -170,7 +200,7 @@ class PersonFollowing():
     def point_distance_by_speed(self, speed):
         b = math.log(self.min_possible_distance / self.max_possible_distance) / (self.max_walking_speed * 2)
         a = self.max_possible_distance / math.exp(-self.max_walking_speed * b)
-        return round(a * math.exp(b * speed), self.max_walking_speed)
+        return round(a * math.exp(b * speed), 2)
 
     def create_possible_pose(self, point, orientation):
         pose = Pose()
@@ -223,9 +253,11 @@ class PersonFollowing():
                         person_pose_transformed = self.tf_listener.transformPose("base_footprint", person.pose) 
                         self.publish_head_orientation(person_pose_transformed)
                         self.person_disappeared = False
-                        speed = self.calculate_speed_between_robot_and_person(person.pose.pose.position, robot_pose.position)
+                        # speed = self.calculate_speed_between_robot_and_person(person.pose.pose.position, robot_pose.position) # REAL ROBOT?
+                        speed = self.calculate_speed_between_robot_and_person(person.pose.pose.position, robot_pose)
                         point_radius = self.point_distance_by_speed(speed)
-                        self.publish_goal(person, robot_pose.position, point_radius)
+                        # self.publish_goal(person, robot_pose.position, point_radius) # REAL ROBOT?
+                        self.publish_goal(person, robot_pose, point_radius)
                         return
                 # If the person disappeared
                 if self.person_disappeared:
@@ -314,10 +346,12 @@ class PersonFollowing():
     ############ Plot people information ############
 
     def set_people_in_image(self, event):
-        # act_image = np.zeros((self.img_y, self.img_x, 3), dtype=np.uint8)
-        if self.new_image and self.new_people:
-            act_image = self.color_image
-            act_image = self.cv_bridge.compressed_imgmsg_to_cv2(act_image, "rgb8")
+        act_image = np.zeros((self.img_y, self.img_x, 3), dtype=np.uint8)
+        # if self.new_people:
+        if self.new_people and self.new_images:
+            # act_image = self.color_image
+            # act_image = self.cv_bridge.compressed_imgmsg_to_cv2(act_image, "rgb8")
+            act_image = cv2.cvtColor(self.color, cv2.COLOR_BGR2RGB)
             act_people = self.people
             for person in act_people:
                 # self.insert_image_to_dataset(act_image[int(person.top):int(person.bot), int(person.left):int(person.right)])
@@ -333,13 +367,17 @@ class PersonFollowing():
                     cv2.rectangle(act_image, (int(person.left), int(person.top)), (int(person.right), int(person.bot)), (0, 0, 255), 2)
                 else:
                     cv2.rectangle(act_image, (int(person.left), int(person.top)), (int(person.right), int(person.bot)), (255, 0, 0), 2)
-                act_image = cv2.putText(act_image, str(person.id), (int(person.left + ((person.right - person.left)/ 2)), int(person.top + ((person.bot - person.top)/ 2))), self.font, self.fontScale, self.color, self.thickness, cv2.LINE_AA)
+                # act_image = cv2.putText(act_image, str(person.id), (int(person.left + ((person.right - person.left)/ 2)), int(person.top + ((person.bot - person.top)/ 2))), self.font, self.fontScale, self.color, self.thickness, cv2.LINE_AA)
                 # act_image = cv2.putText(act_image, str(person.id) + " " + str(person.score), (int(person.left + ((person.right - person.left)/ 2)), int(person.top + 25)), self.font, self.fontScale, self.color, self.thickness, cv2.LINE_AA)
             cv2.imshow("Robot Camera", act_image)
+            rgb = self.color
+            depth = self.depth
+            # cv2.imshow("RGB", rgb)
+            # cv2.imshow("DEPTH", depth*10)
             cv2.waitKey(1)
             cv2.setMouseCallback("Robot Camera", self.select_person)
             self.new_people = False
-            self.new_image = False
+            self.new_images = False
 
     def insert_image_to_dataset(self, image):
         if self.generate_dataset:
@@ -350,7 +388,14 @@ class PersonFollowing():
             output_path = os.path.join(output_folder, str(num_existing_files) + ".png")
             cv2.imwrite(output_path, image)
 
-
+    def display_images(self, event):
+        if self.new_images:
+            rgb = self.color
+            depth = self.depth
+            cv2.imshow("RGB", rgb)
+            cv2.imshow("DEPTH", depth+100)
+            cv2.waitKey(1)
+            self.new_images = False
 
     def select_person(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -394,7 +439,6 @@ if __name__ == '__main__':
     rospy.loginfo("person_following node has been started")
 
     person_following = PersonFollowing(real_robot)
-
     rospy.Timer(rospy.Duration(0.01), person_following.set_people_in_image)
-    rospy.Timer(rospy.Duration(0.05), person_following.publish_person_pose)
+    rospy.Timer(rospy.Duration(0.1), person_following.publish_person_pose)
     rospy.spin()

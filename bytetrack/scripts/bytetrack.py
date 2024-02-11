@@ -30,7 +30,7 @@ class bytetrack():
         # self.new_leg_detection_people = False
         self.followed_person_id = -1
 
-        self.stop_speed_threshold = 0.25
+        self.stop_speed_threshold = 0.2
 
         rospy.init_node("people_tracker")
         rospy.loginfo("People tracker node has been started")
@@ -196,7 +196,7 @@ class bytetrack():
         tracked_people.header.frame_id = "map"
         for track in objects:
             track_object = Object(
-                id=int(track.track_id), score=track.score,
+                id=int(track.track_id), score=float(track.score),
                 left=int(track.bbox[0]), top=int(track.bbox[1]),
                 right=int(track.bbox[2]),
                 bot=int(track.bbox[3]), type=track.clase, image=track.image

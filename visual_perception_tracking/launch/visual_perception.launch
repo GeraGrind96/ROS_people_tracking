@@ -1,10 +1,16 @@
 <launch>
 <arg name="node_start_delay" default="4.0"/>
-<arg name="real_robot" default="1"/>
-<arg name="compressed_image" default="1"/>
+<arg name="real_robot" default="0"/>
+<arg name="compressed_image" default="0"/>
 
-  <node name="yolov8" pkg="yolov8" type="complete_segmentation.py" output="screen" args="--real_robot=$(arg real_robot) --compressed_image=$(arg compressed_image)"/>
+  <node name="yolov8" pkg="yolov8" type="complete_segmentation.py" output="screen">
+    <param name="real_robot" value="$(arg real_robot)"/>
+    <param name="compressed_image" value="$(arg compressed_image)"/>
+  </node>
+
   <node name="bytetrack" pkg="bytetrack" type="bytetrack.py" output="screen" launch-prefix="bash -c 'sleep 10; $0 $@' "/>
-  <node name="person_following" pkg="bytetrack" type="person_following.py" output="screen" launch-prefix="bash -c 'sleep 15; $0 $@' " args="--real_robot=$(arg real_robot)"/>
+  <node name="person_following" pkg="bytetrack" type="person_following.py" output="screen" launch-prefix="bash -c 'sleep 15; $0 $@' ">
+    <param name="real_robot" value="$(arg real_robot)"/>
+  </node>
   <node name="agents_bridge" pkg="bytetrack" type="agents_bridge.py" output="screen" launch-prefix="bash -c 'sleep 20; $0 $@'"/>
 </launch>

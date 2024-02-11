@@ -694,4 +694,3 @@ class HashTracker(object):
             detected_leg_name = detected_legs[detected_leg_index].name
             
             strack.set_associated_legs(detected_leg_name)
-

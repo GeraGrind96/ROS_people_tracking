@@ -115,9 +115,8 @@ class yolov8():
             self.color_image = self.cv_bridge.compressed_imgmsg_to_cv2(rgb, "rgb8")
             self.depth_image = self.cv_bridge.compressed_imgmsg_to_cv2(depth)
         else:
-            self.color_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
-            self.depth_image = self.cv_bridge.imgmsg_to_cv2(depth, depth.encoding)
-
+            self.color_image = self.cv_bridge.imgmsg_to_cv2(rgb)
+            self.depth_image = self.cv_bridge.imgmsg_to_cv2(depth)
         self.get_yolo_objects()
 
     # def display_images(self, event):
@@ -157,7 +156,7 @@ class yolov8():
         
         # Hungarian algorithm for matching people from segmentation model and orientation model
 
-        matches = self.associate_orientation_with_segmentation(bboxes, orientation_bboxes)
+        matches, unm_a, unm_b = self.associate_orientation_with_segmentation(bboxes, orientation_bboxes)
 
         people_poses = []
         for i in range(len(matches)):
@@ -165,7 +164,8 @@ class yolov8():
             orientation = tf.transformations.quaternion_from_euler(0, 0, math.radians(orientations[matches[i][1]][0]) - math.pi)    
             pose_stamped = PoseStamped()
             pose_stamped.header.stamp = rospy.Time(0)
-            pose_stamped.header.frame_id = "head_mount_l515_link" 
+            # pose_stamped.header.frame_id = "head_mount_l515_link" 
+            pose_stamped.header.frame_id = "xtion_link" 
             pose = Pose()
             pose.orientation = Quaternion(x=orientation[0], y=orientation[1], z=orientation[2], w=orientation[3])
             pose.position.x = pose_respect_to_camera[0]
@@ -176,6 +176,7 @@ class yolov8():
             people_poses.append(transformed_pose)
         if len(bboxes) == 0:
             return [], [], [], []
+        # print("TIME", time.time()-t1)
         return bboxes, confidences, people_poses, masks
 
     def get_pose_data(self, result, color_image, depth_image):
@@ -190,7 +191,7 @@ class yolov8():
                 if len(keypoints) == len(boxes):
                     for i in range(len(keypoints)):
                         person_confidence = boxes[i].conf.cpu().numpy()[0]
-                        if person_confidence > 0.8:
+                        if person_confidence > 0.6:
                             person_bbox = boxes[i].xyxy.cpu().numpy().astype(int)[0] 
                             if len(keypoints[i]) > 0: 
                                 # interesting_points_color = [keypoints[i][5], keypoints[i][6], keypoints[i][7], keypoints[i][8], keypoints[i][11], keypoints[i][12], keypoints[i][13], keypoints[i][14]]
@@ -215,6 +216,7 @@ class yolov8():
                                 # # if x_avg < 40 or x_avg > self.width - 40:
                                 # #     continue
                                 neck_point = np.array([x_avg_up, y_avg_up]).astype(int)
+                                # print("neck_point", x_avg_up, y_avg_up)
                                 # back_point = np.array([x_avg_down, y_avg_down]).astype(int)
                                 # gender_pred, age_pred = self.get_pred_attributes(frame, person_bbox[0], person_bbox[1], person_bbox[2], person_bbox[3])
                                 person_pose_up = self.get_neck_distance(neck_point, depth_image, interesting_points_pose[0], interesting_points_pose[1])
@@ -222,7 +224,7 @@ class yolov8():
                                 # print("PERSON POSE:", person_pose_up)
                                 # print("PERSON POSE DOWN:", person_pose_down)
                                 if np.isinf(person_pose_up[0]) or person_pose_up[0] == 0 or person_pose_up[0] > 5:
-                                    # print("REMOVED FOR NON VALID POSE 2")
+                                    print("REMOVED FOR NON VALID POSE 2")
                                     continue                            
                                 pose_poses.append(person_pose_up)
                                 pose_bboxes.append(person_bbox)
@@ -233,7 +235,7 @@ class yolov8():
                                 # cv2.imshow("MASK", person_mask)
                                 pose_masks.append(person_mask)
                         else:
-                            # print("REMOVED FOR NOT ENOUGHT CONFIDENCE")
+                            print("REMOVED FOR NOT ENOUGHT CONFIDENCE")
                             continue
         # cv2.imshow("SKELETONS", color_image)
         # cv2.waitKey(1)
@@ -270,18 +272,27 @@ class yolov8():
 
     def get_neck_distance(self, neck_point, depth_image, point_a, point_b):
         depth_mean = 0
-        max_dist_x = 3
+        max_dist_x = 1
         max_dist_y = 1
         counter = 0  
         range_vector_x = np.array([point_a[0], point_b[0]])
         range_vector_y = np.array([point_a[1], point_b[1]])
         max_value_x, min_value_x = np.max(range_vector_x), np.min(range_vector_x)
         max_value_y, min_value_y = np.max(range_vector_y), np.min(range_vector_y)
+        min_x_loop = np.clip(np.clip(neck_point[0] - max_dist_x, min_value_x, max_value_x), 0, self.width - 1)
+        max_x_loop = np.clip(np.clip(neck_point[0] + max_dist_x + 1, min_value_x, max_value_x), 0, self.width - 1)
+        min_y_loop = np.clip(np.clip(neck_point[1] - max_dist_y, min_value_y, max_value_y), 0, self.height - 1)
+        max_y_loop = np.clip(np.clip(neck_point[1] + max_dist_y + 1, min_value_y, max_value_y), 0, self.height - 1)
+        if (min_x_loop - max_x_loop) == 0:
+            max_x_loop += 1
+        if (min_y_loop - max_y_loop) == 0:
+            max_y_loop += 1
+
+        print(min_x_loop, max_x_loop, min_y_loop, max_y_loop)
         last_depth_value = None
-        for x in range(np.clip(neck_point[0] - max_dist_x, min_value_x, max_value_x), np.clip(neck_point[0] + max_dist_x + 1, min_value_x, max_value_x)):
-            for y in range(np.clip(neck_point[1] - max_dist_y, min_value_y, max_value_y), np.clip(neck_point[1] + max_dist_y + 1, min_value_y, max_value_y)):
+        for x in range(min_x_loop, max_x_loop):
+            for y in range(min_y_loop, max_y_loop):
                 depth_value = int(depth_image[y, x])
-                # print("DEPTH:", x, y, depth_value)
                 if not np.isinf(depth_value) and depth_value != 0 and depth_value < 5000: 
                     if last_depth_value is None:
                         last_depth_value = depth_value
@@ -391,7 +402,7 @@ class yolov8():
     def associate_orientation_with_segmentation(self, seg_bboxes, ori_bboxes):
         dists = self.iou_distance(seg_bboxes, ori_bboxes)
         matches, unmatched_a, unmatched_b = self.linear_assignment(dists, 0.9)
-        return matches
+        return matches, unmatched_a, unmatched_b
 
     def linear_assignment(self, cost_matrix, thresh):
         if cost_matrix.size == 0:
