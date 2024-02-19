@@ -90,8 +90,8 @@ class yolov8():
         self.thickness = 2
 
         # Models
-        self.model_v8_pose = YOLO(package_folder +'/3rdparty/YOLO_models/yolov8n-pose.pt')
-        self.model_v8_seg = YOLO(package_folder +'/3rdparty/YOLO_models/yolov8n-seg.engine')
+        self.model_v8_pose = YOLO(package_folder +'/3rdparty/YOLO_models/yolov8n-pose.engine')
+        # self.model_v8_seg = YOLO(package_folder +'/3rdparty/YOLO_models/yolov8n-seg.engine')
         self.load_orientation_model()
         # self.init_person_classifier()
 
@@ -165,7 +165,7 @@ class yolov8():
             pose_stamped = PoseStamped()
             pose_stamped.header.stamp = rospy.Time(0)
             # pose_stamped.header.frame_id = "head_mount_l515_link" 
-            pose_stamped.header.frame_id = "xtion_link" 
+            pose_stamped.header.frame_id = "sensor_mount_link" 
             pose = Pose()
             pose.orientation = Quaternion(x=orientation[0], y=orientation[1], z=orientation[2], w=orientation[3])
             pose.position.x = pose_respect_to_camera[0]
@@ -228,7 +228,8 @@ class yolov8():
                                     continue                            
                                 pose_poses.append(person_pose_up)
                                 pose_bboxes.append(person_bbox)
-                                pose_confidences.append(person_confidence)   
+                                pose_confidences.append(person_confidence)  
+                                print("POSE", person_pose_up) 
                                 # color_lines = [[interesting_points_color[0], interesting_points_color[1]], [interesting_points_color[3], interesting_points_color[1]], [interesting_points_color[0], interesting_points_color[2]], [interesting_points_color[4], interesting_points_color[6]], [interesting_points_color[5], interesting_points_color[7]]]
                                 color_lines = [[interesting_points_color[0], interesting_points_color[1]], [interesting_points_color[3], interesting_points_color[1]], [interesting_points_color[0], interesting_points_color[2]], [interesting_points_color[4], interesting_points_color[0]], [interesting_points_color[5], interesting_points_color[1]]]
                                 person_mask = self.get_most_common_color(color_lines, color_image)

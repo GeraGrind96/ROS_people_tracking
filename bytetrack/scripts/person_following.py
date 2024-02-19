@@ -280,6 +280,7 @@ class PersonFollowing():
     
     def publish_head_orientation(self, person_pose):
         person_robot_angle_x = math.atan2(person_pose.pose.position.y, person_pose.pose.position.x)
+        print("person_robot_angle_x", person_robot_angle_x)
         goal = JointTrajectory()
         goal.joint_names = ["head_pan_joint", "head_tilt_joint"]
         goal.points = []

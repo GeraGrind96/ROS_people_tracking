@@ -58,6 +58,7 @@ class WebotsAgents(object):
             tracked_agent = TrackedAgent()
             tracked_agent.type = AgentType.HUMAN
             tracked_agent.name = "human"+str(agent.id)
+            print("AGENT NAME", tracked_agent.name)
             tracked_agent.track_id = agent.id
             tracked_agent.segments.append(agent_segment)
             tracked_agents.agents.append(tracked_agent)
